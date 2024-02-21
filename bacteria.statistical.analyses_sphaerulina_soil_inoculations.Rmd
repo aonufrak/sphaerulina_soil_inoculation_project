@@ -1,0 +1,1101 @@
+---
+title: "septoria_in_a_bag_bacteria_archaea_statistical_analyses"
+output: html_document
+date: "2024-02-02"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Loading Packages
+
+```{r}
+library(vegan)
+library(ggplot2)
+library(dplyr)
+library(ape)
+library(tidyr)
+library(DESeq2)
+library(ggpubr)
+library(hillR)
+library(rstatix)
+library(car)
+library(pime)
+library(phyloseq)
+library(stringr)
+library(FSA)
+library(plotly)
+```
+
+# Creating a rarefy table function
+
+```{r}
+# Removing unrarefied samples (those less than the minimum sequencing depth). Removing ASVs present in the ASV table that were only present in samples removed following rarefaction. These ASVs will have column sums of 0. 
+rarefy_formatting<-function(rarefied_table,sample){
+  ds.rarefied<-as.data.frame(subset(rarefied_table, rowSums(rarefied_table)>=sample))
+  ds.rare.asv<-ds.rarefied[,colSums(ds.rarefied)>0]
+  return(ds.rare.asv)
+}
+```
+
+# Creating a PCoA Function
+Because I generate a lot of PCoAs, the code can get really messy as I make a bunch of different PCoA plots. The below function wraps the PCoA functions from vegan and ape and places the output into a two object list. The first is the PCoA output and the second is a ggplot that is customizable based on what variables you want to display. 
+
+```{r}
+pcoa_imager<-function(table,method,color,color_two=NULL,shape=NULL,polygon=NULL){
+  column_grabber<-`[[`
+  color<-column_grabber(table,color)
+  color_two<-column_grabber(table,color_two)
+  shape<-column_grabber(table,shape)
+  # using the decostand function from vegan to convert count data to relative abundances
+  relabund.asv<-decostand(Filter(is.numeric,table), method="total")
+  # calculating distance matrix using the vegdist function from vegan. Method is a user specified variable to indicate which method for computing distance to be used. 
+  dist.asv<-vegdist(relabund.asv, method=method)
+  # using the pcoa function from ape to perform a PCoA with the distance matrix stored in dist.asv. 
+  pcoa.asv<-pcoa(dist.asv)
+  # creating a dataframe that only includes the vectors from the PCoA. 
+  pcoavec.asv<-as.data.frame(pcoa.asv$vectors)
+  # creating a datatable that is only the first and second PCs. 
+  pcoasitescores.asv<-data.frame(PC1=pcoavec.asv$Axis.1, PC2=pcoavec.asv$Axis.2)
+  # creating a if/else statement based on presence of secondary coloring variable. 
+      if (is.null(color_two)){
+      pcoagraph.asv<-data.frame(pcoasitescores.asv,PC1=pcoasitescores.asv$PC1, PC2=pcoasitescores.asv$PC2, color=color, shape_var=shape)
+    } else {
+  pcoagraph.asv<-data.frame(pcoasitescores.asv,PC1=pcoasitescores.asv$PC1, PC2=pcoasitescores.asv$PC2, color=color, color.two=color_two, shape_var=shape)}
+  
+  # generates standard deviation ellipses based on color variable
+  pcoaellipse<-ordiellipse(pcoasitescores.asv,pcoagraph.asv$color, display="sites", kind="sd", draw="none")
+  ell <- data.frame()
+for(g in levels(as.factor(pcoagraph.asv$color))){
+ell <- rbind(ell, cbind(as.data.frame(with(pcoagraph.asv[pcoagraph.asv$color==g,],                                                vegan:::veganCovEllipse(pcoaellipse[[g]]$cov,pcoaellipse[[g]]$center,pcoaellipse[[g]]$scale))) ,color=g))}
+  
+  # Generates secondary ellipse for second color
+pcoaellipse.2<-ordiellipse(pcoasitescores.asv,pcoagraph.asv$color.two, display="sites", kind="sd", draw="none")
+  ell_2 <- data.frame()
+for(g in levels(as.factor(pcoagraph.asv$color.two))){
+ell_2 <- rbind(ell_2, cbind(as.data.frame(with(pcoagraph.asv[pcoagraph.asv$color.two==g,],                                                vegan:::veganCovEllipse(pcoaellipse.2[[g]]$cov,pcoaellipse.2[[g]]$center,pcoaellipse.2[[g]]$scale))) ,color.two=g))}  
+  
+  
+  if (polygon==TRUE){
+  pcoa_plot<-ggplot(pcoagraph.asv, aes(PC1,PC2, colour=color))+
+    (if (is.null(shape)){
+      geom_point(size=3.5)
+    } else {
+  geom_point(aes(shape=shape_var), size=3.5)})+
+  geom_path(data=ell, aes(x=PC1, y=PC2, colour=color),linewidth=0.5, linetype=1)+
+  geom_polygon(data=ell_2, aes(x=PC1, y=PC2, fill=color.two),linewidth=0.5, linetype=2,inherit.aes = FALSE,alpha=0.1)+
+  theme(axis.title.x=element_text(size=14, face="bold"))+
+  theme(axis.title.y=element_text(size=14, face="bold"))+
+  theme(axis.text.x=element_text(size=12, face="bold"))+
+  theme(axis.text.y=element_text(size=12, face="bold"))+ 
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", linewidth =1, fill=NA),
+    panel.background = element_rect(fill="white"))+
+    xlab(paste0("PC1"," (",round(column_grabber(pcoa.asv,"values")[1,2]*100,2),"%)"))+
+    ylab(paste0("PC2"," (",round(column_grabber(pcoa.asv,"values")[2,2]*100,2),"%)"))}
+  else{ggplot(pcoagraph.asv, aes(PC1,PC2, colour=color))+
+    (if (is.null(shape)){
+      geom_point(size=3.5)
+    } else {
+  geom_point(aes(shape=shape_var), size=3.5)})+
+  geom_path(data=ell, aes(x=PC1, y=PC2, colour=color),linewidth=0.5, linetype=1)+
+ theme(axis.title.x=element_text(size=14, face="bold"))+
+  theme(axis.title.y=element_text(size=14, face="bold"))+
+  theme(axis.text.x=element_text(size=12, face="bold"))+
+  theme(axis.text.y=element_text(size=12, face="bold"))+ 
+  theme(panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+    panel.border=element_rect(colour="black", size=1, fill=NA),
+    panel.background = element_rect(fill="white"))+
+      xlab(paste0("PC1"," (",round(column_grabber(pcoa.asv,"values")[1,2]*100,2),"%)"))+
+    ylab(paste0("PC2"," (",round(column_grabber(pcoa.asv,"values")[2,2]*100,2),"%)"))}
+  pcoa_func_out<-list(pcoa.asv,pcoa_plot)
+  return(list(pcoa.asv,pcoa_plot))
+}
+
+```
+
+# Relative Abundance Plot Function
+```{r}
+relative_abundance_plots<-function(metadata,taxonomy_table,asv.table,grouping.var,taxon_level,cut_off){
+  metadata.asv.tab<-merge(metadata,asv.table,by.x=0,by.y=0)
+  metadata.asv.tab_group_sums<-metadata.asv.tab[,c(which(colnames(metadata.asv.tab)==paste0("",deparse(substitute(grouping.var)),"")),which(sapply(metadata.asv.tab,is.numeric)))]%>%
+    as.data.frame()%>%
+    group_by({{grouping.var}})%>%
+    summarize_all(sum)%>%
+    as.data.frame()
+  row.names(metadata.asv.tab_group_sums)<-metadata.asv.tab_group_sums[[deparse(substitute(grouping.var))]]
+  metadata.asv.tab_group_sums[[deparse(substitute(grouping.var))]]<-NULL
+  t.metadata.asv.tab_group_sums<-as.data.frame(t(metadata.asv.tab_group_sums))
+ t.metadata.asv.tab_group_sums[]<-as.data.frame(sapply(t.metadata.asv.tab_group_sums,as.numeric))
+ metadata.asv.tab.taxonomy_group_sums<-merge(taxonomy_table,t.metadata.asv.tab_group_sums,by=0)
+ metadata.asv.tab.taxonomy_taxon_sums<-metadata.asv.tab.taxonomy_group_sums[,c(which(colnames(metadata.asv.tab.taxonomy_group_sums)==paste0("",deparse(substitute(taxon_level)),"")),which(sapply(metadata.asv.tab.taxonomy_group_sums,is.numeric)))]%>%
+ as.data.frame()%>%
+group_by({{taxon_level}})%>%
+summarize_all(sum)%>%
+as.data.frame()
+ metadata.asv.tab.taxonomy_taxon_sums[[deparse(substitute(taxon_level))]][which(is.na(metadata.asv.tab.taxonomy_taxon_sums[[deparse(substitute(taxon_level))]]))]<-"Unassigned"
+  rownames(metadata.asv.tab.taxonomy_taxon_sums)<-metadata.asv.tab.taxonomy_taxon_sums[[deparse(substitute(taxon_level))]]
+  metadata.asv.tab.taxonomy_taxon_sums[[deparse(substitute(taxon_level))]]<-NULL
+  t.metadata.asv.tab.taxonomy_taxon_sums<-as.data.frame(t(metadata.asv.tab.taxonomy_taxon_sums))
+  t.metadata.asv.tab.taxonomy_taxon_cutoff<-t.metadata.asv.tab.taxonomy_taxon_sums[,which((colSums(t.metadata.asv.tab.taxonomy_taxon_sums[,grep("Unassigned",colnames(t.metadata.asv.tab.taxonomy_taxon_sums),invert=TRUE)])/sum(t.metadata.asv.tab.taxonomy_taxon_sums))>substitute(cut_off))]
+    t.metadata.asv.tab.taxonomy_taxon_other<-t.metadata.asv.tab.taxonomy_taxon_sums[,which((colSums(t.metadata.asv.tab.taxonomy_taxon_sums[,grep("Unassigned",colnames(t.metadata.asv.tab.taxonomy_taxon_sums),invert=TRUE)])/sum(t.metadata.asv.tab.taxonomy_taxon_sums))<substitute(cut_off))]
+  taxon_unassigned<-data.frame(Unassigned=t.metadata.asv.tab.taxonomy_taxon_sums[,grep("Unassigned",colnames(t.metadata.asv.tab.taxonomy_taxon_sums),invert=FALSE)])
+  other<-data.frame(Other=rowSums( t.metadata.asv.tab.taxonomy_taxon_other))
+  t.metadata.asv.tab.taxonomy_taxon_cutoff_relabund<-decostand(cbind(t.metadata.asv.tab.taxonomy_taxon_cutoff,other,taxon_unassigned),method="total")
+  t.metadata.asv.tab.taxonomy_taxon_cutoff_relabund_long<-t.metadata.asv.tab.taxonomy_taxon_cutoff_relabund%>%
+    tibble::rownames_to_column(var="Treatment")%>%
+    pivot_longer(cols=!Treatment,names_to = "Family", values_to = "Relative.Abundance")%>%
+    as.data.frame()
+  
+t.metadata.asv.tab.taxonomy_taxon_cutoff_relabund_long[["Family"]]<-factor(unique(t.metadata.asv.tab.taxonomy_taxon_cutoff_relabund_long[["Family"]]),levels=unique(t.metadata.asv.tab.taxonomy_taxon_cutoff_relabund_long[["Family"]]))
+
+colour_count<-length(unique(t.metadata.asv.tab.taxonomy_taxon_cutoff_relabund_long[["Family"]]))
+getPalette <- colorRampPalette(RColorBrewer::brewer.pal(9,"Set1"))
+  
+return(relative_abundance_plot<-ggplot(t.metadata.asv.tab.taxonomy_taxon_cutoff_relabund_long,aes(x=Treatment,y=Relative.Abundance))+
+geom_col(aes(x=Treatment,y=Relative.Abundance,fill=Family),linewidth=0.75,inherit.aes = FALSE,color="black")+
+theme(panel.grid=element_blank(),panel.border = element_rect(color="black",fill=NA),panel.background = element_rect(fill="white"),legend.position = "bottom")+
+  scale_fill_manual(values = c(getPalette(colour_count-1),"lightgrey"))+
+guides(fill=guide_legend(title = deparse(substitute(taxon_level)))))
+}
+
+
+```
+
+
+
+# Loading ASV Table and Data Formatting
+
+Loading in the bacterial ASV table that contains the taxonomy information. Then splitting the taxonomy information from the ASV table. 
+
+```{r}
+# Loading in ASV table with taxonomy information. ASV table has a column called Row.names which is the ASV sequences. Negative controls are present in this table.  
+t.seqtab.tax_v4<-read.table("~/OneDrive - Oak Ridge National Laboratory/septoria_in_a_bag/v4_data/t.seqtab.tax_v4_soil.txt",header=TRUE,sep='\t')
+
+# Checking the row names. Should be ASV IDs
+row.names(t.seqtab.tax_v4)
+
+# Checking the column names. Should be sample names
+colnames(t.seqtab.tax_v4)
+
+# Removing generic illumina info from sample names
+colnames(t.seqtab.tax_v4)<-sub("_F_filt.fastq.gz","",colnames(t.seqtab.tax_v4))
+
+# Number of ASVs in the study following removal of unassigned taxa and non-fungal taxa.
+nrow(t.seqtab.tax_v4)
+
+# Removing Negatives from ASV table
+t.seqtab.tax_v4<-t.seqtab.tax_v4[,grep("NTC",colnames(t.seqtab.tax_v4),invert=TRUE)]
+
+# Subsetting data frame so that only ASV count info is present in ASV table
+t.seqtab_v4<-t.seqtab.tax_v4[,2:(length(t.seqtab.tax_v4)-7)]
+sum(t.seqtab_v4)
+
+# Subsetting data frame so that only taxonomy is present 
+tax.tab_v4<-t.seqtab.tax_v4[,(length(t.seqtab.tax_v4)-6):(length(t.seqtab.tax_v4))]
+
+# Transposing ASV table back to original format so that it can be used with vegan. 
+seqtab_v4<-as.data.frame(t(t.seqtab_v4))
+
+# Fixing the sample name
+row.names(seqtab_v4)[59]<-sub("NoSept_NA_P_R2_MoP_D25","NoSept_NA_NP_R2_MoP_D25",row.names(seqtab_v4)[59])
+```
+
+# Metadata Object
+
+Generating a metadata object that includes the following information:
+
+1. **Inoculation Type**
+  A. SARM07: *Sphaerulina musiva* low virulence
+  B. Mn5: *Sphaerulina musiva* high virulence
+  C. NoSept: Non-inoculate soils
+
+2. **Autoclave Type**
+  A. A: Field soils collected from Oregon that were autoclaved prior to the start of the study and amended into the soil. 
+  B. NA: Field soils collected from Oregon that were amended into study soil that were not autoclaved.
+  
+3. **Plant Presence**
+  A. P: *Populus* was present in the pot.
+  B. NP: *Populus* was not present in the pot and it was soil only. 
+  
+4. **Location of Soil Collection**
+  A. EoP: Edge of pot 
+  B. MoP: Middle of pot
+  C. NR: Near root
+  
+5. **Date of Collection**
+  A. D10/D25: Samples with this information present in the beginning of the name were the initial samples collected prior to fungal addition. 
+  B. o9: Sequencing was completed for these samples October 9th (likely Day 10 samples)
+  C. o15: Sequencing was completed for these samples October 15th (likely Day 25 samples)
+  
+```{r}
+# Creating an empty matrix to ad lib a metadata file
+s.bag.meta<-matrix(nrow=286,ncol=1)
+s.bag.meta<-as.data.frame(s.bag.meta)
+row.names(s.bag.meta)<-row.names(seqtab_v4)
+s.bag.meta$sample_names<-as.data.frame(row.names(seqtab_v4))
+
+# Splitting out information about septoria inoculation from sample names
+septoria<-c(sapply(strsplit(row.names(seqtab_v4[1:192,]),"_"),'[',1),sapply(strsplit(row.names(seqtab_v4[193:nrow(seqtab_v4),]),"_"),'[',2))
+
+# Splitting out information about soil autoclaving from sample names
+autoclave<-c(sapply(strsplit(row.names(seqtab_v4[1:192,]),"_"),'[',2),sapply(strsplit(row.names(seqtab_v4[193:nrow(seqtab_v4),]),"_"),'[',3))
+
+# Splitting out information about presence of a plant from sample names
+plant<-c(sapply(strsplit(row.names(seqtab_v4[1:192,]),"_"),'[',3),sapply(strsplit(row.names(seqtab_v4[193:nrow(seqtab_v4),]),"_"),'[',4))
+
+# Splitting out information about reps from sample names
+rep<-c(sapply(strsplit(row.names(seqtab_v4[1:192,]),"_"),'[',4),sapply(strsplit(row.names(seqtab_v4[193:nrow(seqtab_v4),]),"_"),'[',5))
+
+# Splitting out information regarding sample location collection information
+location<-c(sapply(strsplit(row.names(seqtab_v4[1:192,]),"_"),'[',5),rep("initial",times=94))
+
+# Splitting out information for sampling date
+date<-c(sapply(strsplit(row.names(seqtab_v4[1:192,]),"_"),'[',6),sapply(strsplit(row.names(seqtab_v4[193:nrow(seqtab_v4),]),"_"),'[',6))
+
+# Adding the metadata to the metadata sheet
+s.bag.meta$septoria<-septoria
+s.bag.meta$autoclave<-autoclave
+s.bag.meta$plant<-plant
+s.bag.meta$location<-location
+s.bag.meta$rep<-rep
+s.bag.meta$date<-date
+s.bag.meta<-s.bag.meta[,-c(1,2)]
+
+# Fixing one of the septoria labels that were spelt a little different from the others.
+s.bag.meta$septoria<-sub("noSept","NoSept",s.bag.meta$septoria)
+sample.metadata<-s.bag.meta
+
+# Fixing one of the sample dates that had B instead of D
+sample.metadata$date<-sub("B","D25",sample.metadata$date)
+
+#sample_metadata$sept_general<-ifelse(grepl("Mn5|SARM07",sample_metadata$septoria)==TRUE,"septoria","control")
+
+# Creating a new category called plant_date that indicates plant treatment and date of collection.
+sample.metadata$plant_date<-paste0(sample.metadata$plant,".",sample.metadata$date)
+
+# Creating a new category called plant_date_septoria that indicates plant treatment, date of collection, sphaerulina inoculant.
+sample.metadata$date_septoria<-paste0(sample.metadata$date,"_",sample.metadata$septoria)
+
+# Crating a new category called sept_autoclave that indicates sphaerulina inoculant and autoclave treatment. 
+sample.metadata$sept_autoclave<-paste0(sample.metadata$septoria,"_",sample.metadata$autoclave)
+
+# Creating a new category called sept_plant that indicates sphaerulina incoulant and plant treatment
+sample.metadata$sept_plant<-paste0(sample.metadata$plant,"_",sample.metadata$septoria)
+
+# Determining number of reps per treatment type
+as.data.frame(sample.metadata) %>%
+  group_by(date, septoria, autoclave,plant,location) %>%
+  dplyr::count() %>%
+  print(n=61)
+
+# Subsetting metadata to include only day 2
+sample.metadata_d10d25<-sample.metadata[grep("D10|D25",sample.metadata$date),]
+
+sample.metadata_nr<-sample.metadata_d10d25[grep("NR|MoP",sample.metadata_d10d25$location),]
+
+as.data.frame(sample.metadata_nr) %>%
+  group_by(date, septoria, autoclave,plant,location) %>%
+  dplyr::count() %>%
+  print(n=61)
+```
+
+
+```{r}
+# Subsetting to include only day 10 and day 25 samples
+seqtab_v4_d10d25<-seqtab_v4[grep("_D10|_D25",row.names(seqtab_v4)),]
+
+# Subsetting to include only near root samples. 
+seqtab_v4_d10d25_nrmop<-seqtab_v4_d10d25[grep("_NR_|_MoP_",row.names(seqtab_v4_d10d25)),]
+nrow(seqtab_v4_d10d25_nrmop)
+
+# Subsetting to only pull out autoclaved samples
+seqtab_v4_d10d25_nrmop_autoclave<-seqtab_v4_d10d25_nrmop[grep("_A_",row.names(seqtab_v4_d10d25_nrmop)),]
+
+# Generating rarefaction curves for autoclaved samples
+rarefy.plot_d10d25_nrmop_autoclave<-rarecurve(seqtab_v4_d10d25_nrmop_autoclave,tidy = TRUE)
+
+# Subsetting to only pull out non-autoclaved samples
+seqtab_v4_d10d25_nrmop_nonautoclave<-seqtab_v4_d10d25_nrmop[grep("_NA_",row.names(seqtab_v4_d10d25_nrmop)),]
+
+# Generating rarefaction curves for non-autoclaved samples
+rarefy_plot_d10d25_nrmop_nonautoclave<-rarecurve(seqtab_v4_d10d25_nrmop_nonautoclave,tidy = TRUE)
+
+# Plotting rarefaction curves in ggplot
+bacterial_rareplot_d10_d25_nr_mop<-ggplot()+
+  geom_line(data=rarefy_plot_d10_d25_nr_mop_autoclave,aes(x=Sample,y=Species,color=Site))+
+  geom_line(data=rarefy_plot_d10_d25_nr_mop_nonautoclave,aes(x=Sample,y=Species,color=Site),inherit.aes=FALSE)+
+  geom_vline(data=NULL,xintercept=c(5000,10000,20000,30000,40000,50000,60000,70000,80000,90000,100000))+
+  theme(legend.position="none")+
+  geom_text(data=NULL,aes(x=3500,y=8500,label="5000",angle=90))+
+  geom_text(data=NULL,aes(x=8500,y=8500,label="10000",angle=90))+
+  geom_text(data=NULL,aes(x=18000,y=8500,label="20000",angle=90))+
+  geom_text(data=NULL,aes(x=28000,y=8500,label="30000",angle=90))+
+  geom_text(data=NULL,aes(x=38000,y=8500,label="40000",angle=90))+
+  geom_text(data=NULL,aes(x=48000,y=8500,label="50000",angle=90))+
+  geom_text(data=NULL,aes(x=58000,y=8500,label="60000",angle=90))+
+  geom_text(data=NULL,aes(x=68000,y=8500,label="70000",angle=90))+
+  geom_text(data=NULL,aes(x=78000,y=8500,label="80000",angle=90))+
+  geom_text(data=NULL,aes(x=88000,y=8500,label="90000",angle=90))+
+  geom_text(data=NULL,aes(x=98000,y=8500,label="100000",angle=90))
+
+bacterial_rareplot_d10_d25_nr_mop
+
+# Rarefying the ASV table to 30000 sequences
+rare.asv.tab_v4_d10d25_nrmop<-as.data.frame(rrarefy(seqtab_v4_d10d25_nrmop, sample=30000))
+
+# Removing samples that do not meet rarefaction cut-off and ASVs with zero reads following rarefaction.
+rare.asv.tab.fmt_v4_d10d25_nrmop<-rarefy_formatting(rare.asv.tab_v4_d10d25_nrmop,30000)
+
+# Exporting rarefied ASV table to have a consitent file
+#write.table(rare.asv.tab.fmt_v4_d10d25_nrmop,"~/OneDrive - Oak Ridge National Laboratory/septoria_in_a_bag/v4_data/rare.asv.tab.fmt_v4_d10_d25_nrmop.txt",col.names = TRUE,row.names = TRUE,sep='\t')
+```
+
+# Starting statistical analyses of d10/d25 data 
+
+```{r}
+# Importing rarefied ASV table
+rare.asv.tab.fmt_v4_d10d25_nrmop<-read.table("~/OneDrive - Oak Ridge National Laboratory/septoria_in_a_bag/v4_data/rare.asv.tab.fmt_v4_d10_d25_nrmop.txt",header=TRUE,sep='\t')
+
+# Adding metadata to ASV table.
+metadata.rare.asv.tab.fmt_v4_d10d25_nrmop<-merge(sample.metadata,rare.asv.tab.fmt_v4_d10d25_nrmop,by.x=0,by.y=0)
+
+# Checking number of samples retained after rarefaction. 
+nrow(metadata.rare.asv.tab.fmt_v4_d10d25_nrmop)
+
+# Tabulating summaries
+metadata.rare.asv.tab.fmt_v4_d10d25_nrmop %>%
+  group_by(date,septoria,plant,autoclave) %>%
+  dplyr::count()%>%
+  print(n=55)
+
+# Won't have enough power to look at plant/isolate/autoclave interaction but will have enough to look at autoclave alone. 
+
+colnames(rare.asv.tab.fmt_v4_d10d25_nrmop)<-sub("\\."," ",colnames(rare.asv.tab.fmt_v4_d10d25_nrmop))
+
+# General Beta-Diversity
+pcoa_v4_autoclave<-pcoa_imager(metadata.rare.asv.tab.fmt_v4_d10d25_nrmop,method = "bray",color="autoclave",shape="septoria", polygon=TRUE,color_two="autoclave")
+
+pcoa_v4_autoclave[[1]]
+pcoa_v4_autoclave_plot<-pcoa_v4_autoclave[[2]]+
+  guides(fill=guide_legend("Autoclave"),color=guide_legend("Autoclave"),shape=guide_legend("Septoria Isolate"))+
+  scale_fill_discrete(labels=c("Autoclaved","Non-Autoclaved"))+
+  scale_color_discrete(labels=c("Autoclaved","Non-Autoclaved"))+
+  scale_shape_discrete(labels=c("Mn5 (High Virulence)","Control","SARM07 (Low Virulence)"))
+pcoa_v4_autoclave_plot
+
+adonis2(Filter(is.numeric,metadata.rare.asv.tab.fmt_v4_d10d25_nrmop)~metadata.rare.asv.tab.fmt_v4_d10d25_nrmop$autoclave)
+
+# General Alpha-Diversity
+alpha_diversity_d10_d25_nr_mop<-data.frame(Filter(is.character,metadata.rare.asv.tab.fmt_v4_d10d25_nrmop),q0=hill_taxa(Filter(is.numeric,metadata.rare.asv.tab.fmt_v4_d10d25_nrmop),q=0),q1=hill_taxa(Filter(is.numeric,metadata.rare.asv.tab.fmt_v4_d10d25_nrmop),q=1),q2=hill_taxa(Filter(is.numeric,metadata.rare.asv.tab.fmt_v4_d10d25_nrmop),q=2))
+
+
+# T.test/Wilcox Tests for q0
+t.test(formula=alpha_diversity_d10_d25_nr_mop$q0~alpha_diversity_d10_d25_nr_mop$autoclave)
+shapiro.test(alpha_diversity_d10_d25_nr_mop$q0)
+ggqqplot(alpha_diversity_d10_d25_nr_mop,x="q0")
+
+# Non-parametric alternative
+wilcox.test(alpha_diversity_d10_d25_nr_mop$q0~alpha_diversity_d10_d25_nr_mop$autoclave)
+wilcox_effsize(alpha_diversity_d10_d25_nr_mop,q0~autoclave)
+
+# T.test/Wilcox Tests for q1
+t.test(formula=alpha_diversity_d10_d25_nr_mop$q1~alpha_diversity_d10_d25_nr_mop$autoclave)
+shapiro.test(alpha_diversity_d10_d25_nr_mop$q1)
+ggqqplot(alpha_diversity_d10_d25_nr_mop,x="q1")
+
+# Non-parametric alternative
+wilcox.test(alpha_diversity_d10_d25_nr_mop$q1~alpha_diversity_d10_d25_nr_mop$autoclave)
+wilcox_effsize(alpha_diversity_d10_d25_nr_mop,q1~autoclave)
+
+# T.test/Wilcox Tests for q2
+t.test(formula=alpha_diversity_d10_d25_nr_mop$q2~alpha_diversity_d10_d25_nr_mop$autoclave)
+shapiro.test(alpha_diversity_d10_d25_nr_mop$q2)
+ggqqplot(alpha_diversity_d10_d25_nr_mop,x="q2")
+
+# Non-parametric alternative
+wilcox.test(alpha_diversity_d10_d25_nr_mop$q2~alpha_diversity_d10_d25_nr_mop$autoclave)
+wilcox_effsize(alpha_diversity_d10_d25_nr_mop,q2~autoclave)
+
+# Converting to long
+alpha_diversity_d10_d25_nr_mop_long<-gather(alpha_diversity_d10_d25_nr_mop,key="q",value="index",12:14)
+
+# Creating vector of significance lettering based on Wilcox tests 
+sig_code_autoclave<-data.frame(q=c("q0","q0","q1","q1","q2","q2"),lab=c("A","B","A","B","A","B"),x=c(1,2,1,2,1,2),y=c(6000,6000,2250,2250,810,810))
+
+# Plotting in ggplot
+autoclave_alpha_diversity<-ggplot(alpha_diversity_d10_d25_nr_mop_long,aes(x=autoclave,y=index,fill=autoclave))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_jitter(inherit.aes=FALSE,aes(x=autoclave,y=index,fill=autoclave),shape=21,color="black",alpha=0.3)+
+  facet_wrap(.~q,scales = "free_y")+
+  geom_text(data=sig_code_autoclave,aes(x=x,y=y,label=lab,fontface="bold"),inherit.aes=FALSE)+
+  guides(fill=guide_legend("Autoclave"))+
+  theme(panel.grid=element_blank(),panel.border = element_rect(color="black",fill=NA),panel.background = element_rect(fill="white"))+
+  ylab("Index Value")+
+  xlab("Autoclave")+
+  scale_fill_discrete(labels=c("Autoclaved","Non-Autoclaved"))+
+  scale_color_discrete(labels=c("Autoclaved","Non-Autoclaved"))
+  
+  
+autoclave_alpha_diversity
+
+```
+
+# Comparisons of bacterial communities within autoclaved soils only
+
+```{r}
+# loading in autoclaved rarefied ASV table 
+rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave<-read.table("~/OneDrive - Oak Ridge National Laboratory/septoria_in_a_bag/v4_data/rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave.txt",header=TRUE,sep='\t')
+
+# Adding metadata
+metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave<-merge(sample.metadata,rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave,by.x=0,by.y=0)
+
+# Tabulating summaries
+metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave %>%
+  group_by(date,septoria,plant,autoclave) %>%
+  dplyr::count()%>%
+  print(n=55)
+
+# Beta-Diversity for all autoclaved samples regardless of sampling date
+pcoa_v4_within_autoclave<-pcoa_imager(metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave,method = "bray",color="date",shape="septoria",polygon=TRUE,color_two="plant")
+pcoa_v4_within_autoclave[[1]]
+pcoa_v4_within_autoclave_plot<-pcoa_v4_within_autoclave[[2]]+
+  guides(fill=guide_legend("Septoria Isolate"),color=guide_legend("Day"),shape=guide_legend("Septoria Isolate"))+
+  scale_fill_discrete(labels=c("No Plant","Plant"))+
+  scale_color_discrete(labels=c("Day 10","Day 25"))+
+  scale_shape_discrete(labels=c("Mn5 (High Virulence)","Control","SARM07 (Low Virulence)"))
+pcoa_v4_within_autoclave_plot
+
+# PERMANOVA
+adonis2(Filter(is.numeric,metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave)~metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave$plant*metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave$date*metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave$septoria)
+
+```
+
+
+# Separating the autoclaved soil fungal communities by date starting with day 10. 
+
+```{r}
+# loading in rarefied autoclaved ASV table
+rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave<-read.table("~/OneDrive - Oak Ridge National Laboratory/septoria_in_a_bag/v4_data/rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave.txt",header=TRUE,sep='\t')
+
+colnames(rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave)<-sub("\\."," ",colnames(rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave))
+
+# Adding metadata
+metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave<-merge(sample.metadata,rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave,by.x=0,by.y=0)
+
+# Pulling out day 10 samples only
+metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d10<-metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave[grep("D10",metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave$date),]
+
+relative_abundance_plots(metadata=sample.metadata,taxonomy_table = tax.tab_v4,asv.table=rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave,grouping.var=sept_plant,taxon_level = Family,cut_off=0.005)
+
+# Tabulating summaries
+metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d10 %>%
+  group_by(date,septoria,plant,autoclave) %>%
+  dplyr::count()%>%
+  print(n=55)
+
+# Beta-Diversity for all autoclaved samples regardless of sampling date
+pcoa_v4_within_autoclave_d10<-pcoa_imager(metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d10,method="bray",color="sept_plant",shape="septoria",polygon=TRUE,color_two="plant")
+pcoa_v4_within_autoclave_d10[[1]]
+pcoa_v4_within_autoclave_d10_plot<-pcoa_v4_within_autoclave_d10[[2]]+
+  guides(fill=guide_legend("Plant Presence"),color=guide_legend("Septoria Isolate x Plant Presence"),shape=guide_legend("Septoria Isolate"))+
+  scale_fill_discrete(labels=c("No Plant","Plant"))+
+  scale_shape_discrete(labels=c("Mn5 (High Virulence)","Control","SARM07 (Low Virulence)"))+
+  scale_color_discrete(labels=c("Mn5 (High Virulence) x No Plant","Control x No Plant","SARM07 (Low Virulence) x No Plant","Mn5 (High Virulence) x Plant","Control x Plant","SARM07 (Low Virulence) x Plant"))
+pcoa_v4_within_autoclave_d10_plot
+
+# PERMANOVA
+adonis2(Filter(is.numeric,metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d10)~metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d10$plant*metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d10$septoria)
+
+# General Alpha-Diversity
+alpha.diversity_nrmop_autoclave_d10<-data.frame(Filter(x = metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d10,f=is.character),q0=hill_taxa(Filter(x=metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d10,f=is.numeric),q=0),q1=hill_taxa(Filter(x=metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d10,f=is.numeric),q=1),q2=hill_taxa(Filter(x=metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d10,f=is.numeric),q=2))
+
+# ANOVA q0
+anova.alpha.diversity_autoclave_d10_q0<-aov(q0~plant*septoria,data = alpha.diversity_nrmop_autoclave_d10)
+par(mfrow=c(2,2))
+plot(anova.alpha.diversity_autoclave_d10_q0)
+car::Anova(anova.alpha.diversity_autoclave_d10_q0,type="III")
+
+# ANOVA q1
+anova.alpha.diversity_autoclave_d10_q1<-aov(q1~plant*septoria,data = alpha.diversity_nrmop_autoclave_d10)
+par(mfrow=c(2,2))
+plot(anova.alpha.diversity_autoclave_d10_q1)
+car::Anova(anova.alpha.diversity_autoclave_d10_q1,type="III")
+TukeyHSD(anova.alpha.diversity_autoclave_d10_q1)
+
+# ANOVA q2
+anova.alpha.diversity_autoclave_d10_q2<-aov(q2~plant*septoria,data = alpha.diversity_nrmop_autoclave_d10)
+par(mfrow=c(2,2))
+plot(anova.alpha.diversity_autoclave_d10_q2)
+car::Anova(anova.alpha.diversity_autoclave_d10_q2,type="III")
+TukeyHSD(anova.alpha.diversity_autoclave_d10_q2)
+
+# Converting to long format to plot in ggplot
+alpha.diversity_nrmop_autoclave_d10_long<-gather(alpha.diversity_nrmop_autoclave_d10,key="q",value="index",12:14)
+
+# Plotting in ggplot
+alpha.diversity_v4_nrmop_autoclave_d10_plot<-ggplot(alpha.diversity_nrmop_autoclave_d10_long,aes(x=plant,y=index,fill=septoria))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(inherit.aes=FALSE,aes(x=plant,y=index,fill=septoria),shape=21,color="black",alpha=0.9,position=position_jitterdodge(dodge.width = .90))+
+  facet_wrap(.~q,scales = "free_y")+
+  theme(panel.grid=element_blank(),panel.border = element_rect(color="black",fill=NA),panel.background = element_rect(fill="white"))+
+  scale_x_discrete(labels=c("No Plant","Plant"))+
+  ylab("Index Value")+
+  xlab("Plant Presence")+
+  scale_fill_discrete(labels=c("Mn5 (High Virulence)","Control","SARM07 (Low Virulence)"))+
+  scale_color_discrete(labels=c("Mn5 (High Virulence)","Control","SARM07 (Low Virulence)"))+
+  guides(fill=guide_legend("Septoria Isolate"),color=guide_legend("Septoria Isolate"))
+  
+  
+alpha.diversity_v4_nrmop_autoclave_d10_plot
+```
+
+# PIME Analysis for Day 10 Autoclaved Soils
+
+```{r}
+# loading in rarefied autoclaved ASV table
+rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave<-read.table("~/OneDrive - Oak Ridge National Laboratory/septoria_in_a_bag/v4_data/rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave.txt",header=TRUE,sep='\t')
+
+# Removing period in ASV labels and replacing with space. 
+colnames(rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave)<-sub("\\."," ",colnames(rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave))
+
+# Loading in sample metadata
+sample.metadata<-read.table("~/OneDrive - Oak Ridge National Laboratory/septoria_in_a_bag/sample_metadata_from_sample_names.txt",header=TRUE,sep='\t',na.strings = "-")
+
+# Adding metadata
+metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave<-merge(sample.metadata,rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave,by.x=0,by.y=0)
+
+# Pulling out day 10 samples only
+metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d10<-metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave[grep("D10",metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave$date),]
+
+# Adding row names to metadata file to allow for creation of phyloseq object
+row.names(metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d10)<-metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d10$Row.names
+
+# Creating an OTU table for the phyloseq object
+rare.asv.tab.fmt_v4_nrmop_autoclave_d10_otu_table<-phyloseq::otu_table(object=Filter(x=metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d10,f=is.numeric),taxa_are_rows = FALSE)
+
+# Creating a taxonomy table for the phyloseq object
+rare.asv.tab.fmt_v4_nrmop_autoclave_d10_tax_table<-phyloseq::tax_table(as.matrix(subset(tax.tab_v4,row.names(tax.tab_v4)%in%colnames(Filter(metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d10,f=is.numeric)))))
+
+# Creating a metadata file for the phyloseq object
+rare.asv.tab.fmt_v4_nrmop_autoclave_d10_metadata<-phyloseq::sample_data(metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d10[,2:11])
+
+# Creating phyloseq object
+rare.asv.tab.fmt_v4_nrmop_autoclave_d10_phyloseq_obj<-phyloseq::phyloseq(rare.asv.tab.fmt_v4_nrmop_autoclave_d10_otu_table,rare.asv.tab.fmt_v4_nrmop_autoclave_d10_tax_table,rare.asv.tab.fmt_v4_nrmop_autoclave_d10_metadata)
+
+# Estimating the out of bag error rate prior to prevalence filtering
+pime.oob.error(rare.asv.tab.fmt_v4_nrmop_autoclave_d10_phyloseq_obj,"sept_plant")
+
+# Splitting data by sphaerulina and plant treatment
+pime.variable.split_nrmop_autoclave_d10<-pime.split.by.variable(rare.asv.tab.fmt_v4_nrmop_autoclave_d10_phyloseq_obj,"sept_plant")
+
+# Creating prevalence intervals for each sphaerulina/plant treatment combination
+pime.prevalence_nrmop_autoclave_d10<-pime.prevalence(pime.variable.split_nrmop_autoclave_d10)
+
+# Calculating the random forest error rate for each possible prevalence (in increments of 5)
+set.seed(42)
+pime.best.prevalence_nrmop_autoclave_d10<-pime.best.prevalence(pime.prevalence_nrmop_autoclave_d10,"sept_plant")
+
+# Pulling out the important ASVs for the model with a low error rate
+pime.prevalence.filtered.important.asvs_nrmop_autoclave_d10<-as.data.frame(pime.best.prevalence_nrmop_autoclave_d10$Importance$`Prevalence 85`)
+
+# Pulling out the phyloseq object for the model with a low error rate
+pime.prevalence.filtered.asv.phyloseq_nrmop_autoclave_d10<-pime.prevalence_nrmop_autoclave_d10$'85'
+
+# Assessing model reliability by assigning treatments randomly to samples and computing error rate (expect that it should be an error rate greater than the model error rate when using the actual sample designations that does not change regardless of prevalence filtering). 
+pime.randomized.model_nrmop_autoclave_d10<-pime.error.prediction(rare.asv.tab.fmt_v4_nrmop_autoclave_d10_phyloseq_obj, "sept_plant", bootstrap = 100, parallel = TRUE, max.prev = 95)
+pime.randomized.model_nrmop_autoclave_d10$Plot
+
+# Assessing model error rates over multiple bootstrap replicates
+replicated.oob.error_nrmop_autoclave_d10 <- pime.oob.replicate(pime.prevalence_nrmop_autoclave_d10, "sept_plant", bootstrap = 100, parallel = TRUE)
+replicated.oob.error_nrmop_autoclave_d10$Plot
+
+# Pulling out the ASV table from the phyloseq object from the prevalence filtered object
+pime.prevalence.filtered.asv.table_nrmop_autoclave_d10<-as.data.frame(pime.prevalence.filtered.asv.phyloseq_nrmop_autoclave_d10@otu_table)
+
+# Pulling out the sample metadata from the phyloseq object from the prevalence filtered object
+pime.prevalence.filtered.metadata_nrmop_autoclave_d10<-as.data.frame(pime.prevalence.filtered.asv.phyloseq_nrmop_autoclave_d10@sam_data)
+
+# Pulling out the taxonomy table from the phyloseq object from the prevalence filtered object
+pime.prevalence.filtered.taxonomy_nrmop_autoclave_d10<-as.data.frame(pime.prevalence.filtered.asv.phyloseq_nrmop_autoclave_d10@tax_table)
+
+# Removing the period from the ASV labels to match with the original sequence IDs
+pime.prevalence.filtered.important.asvs_nrmop_autoclave_d10$SequenceID<-sub("\\."," ",pime.prevalence.filtered.important.asvs_nrmop_autoclave_d10$SequenceID)
+
+# Creating new labels to use for ASV importance plot that include the sequence id (ASV and number) and the family assignment
+pime.prevalence.filtered.important.asvs_nrmop_autoclave_d10$tax_id<-sub("f__","",paste0(pime.prevalence.filtered.important.asvs_nrmop_autoclave_d10$SequenceID,"_",pime.prevalence.filtered.important.asvs_nrmop_autoclave_d10$Family))
+
+# Adjusting labels for the plot to make it look slightly more visually appealing.
+pime.prevalence.filtered.important.asvs_nrmop_autoclave_d10$tax_id<-sub("asv_v4 ","asv.v4.",pime.prevalence.filtered.important.asvs_nrmop_autoclave_d10$tax_id)
+
+# Plotting the ASV contributions to model error rates. This will highlight Sphaerulina ASVs in red
+ggplot(data=pime.prevalence.filtered.important.asvs_nrmop_autoclave_d10,aes(x=reorder(tax_id,MeanDecreaseAccuracy),y=MeanDecreaseAccuracy*100))+
+  geom_col()+
+  ylab("Mean Decrease in Model Accuracy (%)")+
+  xlab("ASV")+
+  coord_flip()+
+  theme(panel.grid=element_blank(),panel.border = element_rect(color="black",fill=NA),panel.background = element_rect(fill="white"))
+
+pime.prevalence.filtered.metadata.asv.table_nrmop_autoclave_d10<-merge(pime.prevalence.filtered.metadata_nrmop_autoclave_d10,pime.prevalence.filtered.asv.table_nrmop_autoclave_d10,by=0)
+
+relative_abundance_plots(metadata = pime.prevalence.filtered.metadata_nrmop_autoclave_d10,taxonomy_table = pime.prevalence.filtered.taxonomy_nrmop_autoclave_d10,asv.table = pime.prevalence.filtered.asv.table_nrmop_autoclave_d10,grouping.var = sept_plant,taxon_level = Family,cut_off = 0.01)
+
+# PCoA for autoclaved soils without sphaerulina
+pcoa_v4_within_autoclave_d10_core<-pcoa_imager(pime.prevalence.filtered.metadata.asv.table_nrmop_autoclave_d10,method = "bray",color="sept_plant",shape="septoria",polygon=TRUE,color_two="plant")
+pcoa_v4_within_autoclave_d10_core[[1]]
+
+pcoa_v4_within_autoclave_d10_core_plot<-pcoa_v4_within_autoclave_d10_core[[2]]+
+  guides(fill=guide_legend("Plant Presence"),color=guide_legend("Sphaerulina Isolate x Plant Presence"),shape=guide_legend("Sphaerulina Isolate"))+
+  scale_fill_discrete(labels=c("No Plant","Plant"))+
+  scale_shape_discrete(labels=c("Mn5 (High Virulence)","Control","SARM07 (Low Virulence)"))+
+  scale_color_discrete(labels=c("Mn5 (High Virulence) x No Plant","Control x No Plant","SARM07 (Low Virulence) x No Plant","Mn5 (High Virulence) x Plant","Control x Plant","SARM07 (Low Virulence) x Plant"))
+pcoa_v4_within_autoclave_d10_core_plot
+
+# PERMANOVA for autoclaved soils without Sphaerulina
+adonis2(select_if(pime.prevalence.filtered.metadata.asv.table_nrmop_autoclave_d10,is.numeric)~pime.prevalence.filtered.metadata.asv.table_nrmop_autoclave_d10$septoria*pime.prevalence.filtered.metadata.asv.table_nrmop_autoclave_d10$plant)
+```
+
+
+# Separating the autoclaved soil fungal communities by date starting with day 25. 
+
+```{r}
+# loading in rarefied autoclaved ASV table
+rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave<-read.table("~/OneDrive - Oak Ridge National Laboratory/septoria_in_a_bag/v4_data/rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave.txt",header=TRUE,sep='\t')
+
+colnames(rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave)<-sub("\\."," ",colnames(rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave))
+
+# Adding metadata
+metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave<-merge(sample.metadata,rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave,by.x=0,by.y=0)
+
+# Pulling out day 10 samples only
+metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d25<-metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave[grep("D25",metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave$date),]
+
+# Tabulating summaries
+metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d25 %>%
+  group_by(date,septoria,plant,autoclave) %>%
+  dplyr::count()%>%
+  print(n=55)
+
+relative_abundance_plots(metadata=sample.metadata,taxonomy_table = tax.tab_v4,asv.table = rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave,grouping.var = sept_plant,taxon_level = Family,cut_off=0.01)
+
+# Beta-Diversity for all autoclaved samples regardless of sampling date
+pcoa_v4_within_autoclave_d25<-pcoa_imager(metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d25,method="bray",color="sept_plant",shape="septoria",polygon=TRUE,color_two="plant")
+pcoa_v4_within_autoclave_d25[[1]]
+pcoa_v4_within_autoclave_d25_plot<-pcoa_v4_within_autoclave_d25[[2]]+
+  guides(fill=guide_legend("Plant Presence"),color=guide_legend("Septoria Isolate x Plant Presence"),shape=guide_legend("Septoria Isolate"))+
+  scale_fill_discrete(labels=c("No Plant","Plant"))+
+  scale_shape_discrete(labels=c("Mn5 (High Virulence)","Control","SARM07 (Low Virulence)"))+
+  scale_color_discrete(labels=c("Mn5 (High Virulence) x No Plant","Control x No Plant","SARM07 (Low Virulence) x No Plant","Mn5 (High Virulence) x Plant","Control x Plant","SARM07 (Low Virulence) x Plant"))
+pcoa_v4_within_autoclave_d25_plot
+
+# PERMANOVA
+adonis2(Filter(x=metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d25,f=is.numeric)~metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d25$plant*metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d25$septoria)
+
+# General Alpha-Diversity
+alpha.diversity_nrmop_autoclave_d25<-data.frame(Filter(x = metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d25,f=is.character),q0=hill_taxa(Filter(x=metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d25,f=is.numeric),q=0),q1=hill_taxa(Filter(x=metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d25,f=is.numeric),q=1),q2=hill_taxa(Filter(x=metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d25,f=is.numeric),q=2))
+
+# ANOVA q0
+anova.alpha.diversity_autoclave_d25_q0<-aov(q0~plant*septoria,data = alpha.diversity_nrmop_autoclave_d25)
+par(mfrow=c(2,2))
+plot(anova.alpha.diversity_autoclave_d25_q0)
+car::Anova(anova.alpha.diversity_autoclave_d25_q0,type="III")
+
+# ANOVA q1
+anova.alpha.diversity_autoclave_d25_q1<-aov(q1~plant*septoria,data = alpha.diversity_nrmop_autoclave_d25)
+par(mfrow=c(2,2))
+plot(anova.alpha.diversity_autoclave_d25_q1)
+car::Anova(anova.alpha.diversity_autoclave_d25_q1,type="III")
+
+# ANOVA q2
+anova.alpha.diversity_autoclave_d25_q2<-aov(q2~plant*septoria,data = alpha.diversity_nrmop_autoclave_d25)
+par(mfrow=c(2,2))
+plot(anova.alpha.diversity_autoclave_d25_q2)
+car::Anova(anova.alpha.diversity_autoclave_d25_q2,type="III")
+
+# Converting to long format to plot in ggplot
+alpha.diversity_nrmop_autoclave_d25_long<-gather(alpha.diversity_nrmop_autoclave_d25,key="q",value="index",12:14)
+
+# Plotting in ggplot
+alpha.diversity_v4_nrmop_autoclave_d25_plot<-ggplot(alpha.diversity_nrmop_autoclave_d25_long,aes(x=plant,y=index,fill=septoria))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(inherit.aes=FALSE,aes(x=plant,y=index,fill=septoria),shape=21,color="black",alpha=0.9,position=position_jitterdodge(dodge.width = .90))+
+  facet_wrap(.~q,scales = "free_y")+
+  theme(panel.grid=element_blank(),panel.border = element_rect(color="black",fill=NA),panel.background = element_rect(fill="white"))+
+  scale_x_discrete(labels=c("No Plant","Plant"))+
+  ylab("Index Value")+
+  xlab("Plant Presence")+
+  scale_fill_discrete(labels=c("Mn5 (High Virulence)","Control","SARM07 (Low Virulence)"))+
+  scale_color_discrete(labels=c("Mn5 (High Virulence)","Control","SARM07 (Low Virulence)"))+
+
+  guides(fill=guide_legend("Septoria Isolate"),color=guide_legend("Septoria Isolate"))
+  
+  
+alpha.diversity_v4_nrmop_autoclave_d25_plot
+```
+
+# PIME Analysis for Day 25 Autoclaved Soils
+
+```{r}
+# loading in rarefied autoclaved ASV table
+rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave<-read.table("~/OneDrive - Oak Ridge National Laboratory/septoria_in_a_bag/v4_data/rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave.txt",header=TRUE,sep='\t')
+
+# Removing period in ASV labels and replacing with space. 
+colnames(rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave)<-sub("\\."," ",colnames(rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave))
+
+# Loading in sample metadata
+sample.metadata<-read.table("~/OneDrive - Oak Ridge National Laboratory/septoria_in_a_bag/sample_metadata_from_sample_names.txt",header=TRUE,sep='\t',na.strings = "-")
+
+# Adding metadata
+metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave<-merge(sample.metadata,rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave,by.x=0,by.y=0)
+
+# Pulling out day 10 samples only
+metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d25<-metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave[grep("D25",metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_autoclave$date),]
+
+# Adding row names to metadata file to allow for creation of phyloseq object
+row.names(metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d25)<-metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d25$Row.names
+
+# Creating an OTU table for the phyloseq object
+rare.asv.tab.fmt_v4_nrmop_autoclave_d25_otu_table<-phyloseq::otu_table(object=Filter(x=metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d25,f=is.numeric),taxa_are_rows = FALSE)
+
+# Creating a taxonomy table for the phyloseq object
+rare.asv.tab.fmt_v4_nrmop_autoclave_d25_tax_table<-phyloseq::tax_table(as.matrix(subset(tax.tab_v4,row.names(tax.tab_v4)%in%colnames(Filter(metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d25,f=is.numeric)))))
+
+# Creating a metadata file for the phyloseq object
+rare.asv.tab.fmt_v4_nrmop_autoclave_d25_metadata<-phyloseq::sample_data(metadata.rare.asv.tab.fmt_v4_nrmop_autoclave_d25[,2:11])
+
+# Creating phyloseq object
+rare.asv.tab.fmt_v4_nrmop_autoclave_d25_phyloseq_obj<-phyloseq::phyloseq(rare.asv.tab.fmt_v4_nrmop_autoclave_d25_otu_table,rare.asv.tab.fmt_v4_nrmop_autoclave_d25_tax_table,rare.asv.tab.fmt_v4_nrmop_autoclave_d25_metadata)
+
+# Estimating the out of bag error rate prior to prevalence filtering
+pime.oob.error(rare.asv.tab.fmt_v4_nrmop_autoclave_d25_phyloseq_obj,"sept_plant")
+
+# Splitting data by sphaerulina and plant treatment
+pime.variable.split_nrmop_autoclave_d25<-pime.split.by.variable(rare.asv.tab.fmt_v4_nrmop_autoclave_d25_phyloseq_obj,"sept_plant")
+
+# Creating prevalence intervals for each sphaerulina/plant treatment combination
+pime.prevalence_nrmop_autoclave_d25<-pime.prevalence(pime.variable.split_nrmop_autoclave_d25)
+
+# Calculating the random forest error rate for each possible prevalence (in increments of 5)
+set.seed(42)
+pime.best.prevalence_nrmop_autoclave_d25<-pime.best.prevalence(pime.prevalence_nrmop_autoclave_d25,"sept_plant")
+
+# Pulling out the important ASVs for the model with a low error rate
+pime.prevalence.filtered.important.asvs_nrmop_autoclave_d25<-as.data.frame(pime.best.prevalence_nrmop_autoclave_d25$Importance$`Prevalence 85`)
+
+# Pulling out the phyloseq object for the model with a low error rate
+pime.prevalence.filtered.asv.phyloseq_nrmop_autoclave_d25<-pime.prevalence_nrmop_autoclave_d25$'85'
+
+# Assessing model reliability by assigning treatments randomly to samples and computing error rate (expect that it should be an error rate greater than the model error rate when using the actual sample designations that does not change regardless of prevalence filtering). 
+pime.randomized.model_nrmop_autoclave_d25<-pime.error.prediction(rare.asv.tab.fmt_v4_nrmop_autoclave_d25_phyloseq_obj, "sept_plant", bootstrap = 100, parallel = TRUE, max.prev = 95)
+pime.randomized.model_nrmop_autoclave_d25$Plot
+
+# Assessing model error rates over multiple bootstrap replicates
+replicated.oob.error_nrmop_autoclave_d25 <- pime.oob.replicate(pime.prevalence_nrmop_autoclave_d25, "sept_plant", bootstrap = 100, parallel = TRUE)
+replicated.oob.error_nrmop_autoclave_d25$Plot
+
+# Pulling out the ASV table from the phyloseq object from the prevalence filtered object
+pime.prevalence.filtered.asv.table_nrmop_autoclave_d25<-as.data.frame(pime.prevalence.filtered.asv.phyloseq_nrmop_autoclave_d25@otu_table)
+
+# Pulling out the sample metadata from the phyloseq object from the prevalence filtered object
+pime.prevalence.filtered.metadata_nrmop_autoclave_d25<-as.data.frame(pime.prevalence.filtered.asv.phyloseq_nrmop_autoclave_d25@sam_data)
+
+# Pulling out the taxonomy table from the phyloseq object from the prevalence filtered object
+pime.prevalence.filtered.taxonomy_nrmop_autoclave_d25<-as.data.frame(pime.prevalence.filtered.asv.phyloseq_nrmop_autoclave_d25@tax_table)
+
+# Removing the period from the ASV labels to match with the original sequence IDs
+pime.prevalence.filtered.important.asvs_nrmop_autoclave_d25$SequenceID<-sub("\\."," ",pime.prevalence.filtered.important.asvs_nrmop_autoclave_d25$SequenceID)
+
+# Creating new labels to use for ASV importance plot that include the sequence id (ASV and number) and the family assignment
+pime.prevalence.filtered.important.asvs_nrmop_autoclave_d25$tax_id<-sub("f__","",paste0(pime.prevalence.filtered.important.asvs_nrmop_autoclave_d25$SequenceID,"_",pime.prevalence.filtered.important.asvs_nrmop_autoclave_d25$Family))
+
+# Adjusting labels for the plot to make it look slightly more visually appealing.
+pime.prevalence.filtered.important.asvs_nrmop_autoclave_d25$tax_id<-sub("asv_v4 ","asv.v4.",pime.prevalence.filtered.important.asvs_nrmop_autoclave_d25$tax_id)
+
+# Plotting the ASV contributions to model error rates. This will highlight Sphaerulina ASVs in red
+ggplot(data=pime.prevalence.filtered.important.asvs_nrmop_autoclave_d25,aes(x=reorder(tax_id,MeanDecreaseAccuracy),y=MeanDecreaseAccuracy*100))+
+  geom_col()+
+  ylab("Mean Decrease in Model Accuracy (%)")+
+  xlab("ASV")+
+  coord_flip()+
+  theme(panel.grid=element_blank(),panel.border = element_rect(color="black",fill=NA),panel.background = element_rect(fill="white"))
+
+pime.prevalence.filtered.metadata.asv.table_nrmop_autoclave_d25<-merge(pime.prevalence.filtered.metadata_nrmop_autoclave_d25,pime.prevalence.filtered.asv.table_nrmop_autoclave_d25,by=0)
+
+relative_abundance_plots(metadata = pime.prevalence.filtered.metadata_nrmop_autoclave_d25,taxonomy_table = pime.prevalence.filtered.taxonomy_nrmop_autoclave_d25,asv.table = pime.prevalence.filtered.asv.table_nrmop_autoclave_d25,grouping.var = sept_plant,taxon_level = Family,cut_off = 0.01)
+
+# PCoA for autoclaved soils without sphaerulina
+pcoa_v4_within_autoclave_d25_core<-pcoa_imager(pime.prevalence.filtered.metadata.asv.table_nrmop_autoclave_d25,method = "bray",color="sept_plant",shape="septoria",polygon=TRUE,color_two="plant")
+pcoa_v4_within_autoclave_d25_core[[1]]
+
+pcoa_v4_within_autoclave_d25_core_plot<-pcoa_v4_within_autoclave_d25_core[[2]]+
+  guides(fill=guide_legend("Plant Presence"),color=guide_legend("Sphaerulina Isolate x Plant Presence"),shape=guide_legend("Sphaerulina Isolate"))+
+  scale_fill_discrete(labels=c("No Plant","Plant"))+
+  scale_shape_discrete(labels=c("Mn5 (High Virulence)","Control","SARM07 (Low Virulence)"))+
+  scale_color_discrete(labels=c("Mn5 (High Virulence) x No Plant","Control x No Plant","SARM07 (Low Virulence) x No Plant","Mn5 (High Virulence) x Plant","Control x Plant","SARM07 (Low Virulence) x Plant"))
+pcoa_v4_within_autoclave_d25_core_plot
+
+# PERMANOVA for autoclaved soils without Sphaerulina
+adonis2(select_if(pime.prevalence.filtered.metadata.asv.table_nrmop_autoclave_d25,is.numeric)~pime.prevalence.filtered.metadata.asv.table_nrmop_autoclave_d25$septoria*pime.prevalence.filtered.metadata.asv.table_nrmop_autoclave_d25$plant)
+```
+
+
+# Analyses of nonautoclaved soils alone (Day 10 and Day 25)
+
+```{r}
+# Subsetting ASV table to include only the nonautoclave samples
+seqtab_v4_d10d25_nrmop_nonautoclave<-seqtab_v4_d10d25_nrmop[grep("_NA_",row.names(seqtab_v4_d10d25_nrmop)),]
+
+# Checking sample counts. All treatments should have 4 reps except for D25 NP_A which will have 6 reps. 
+merge(sample.metadata,seqtab_v4_d10d25_nrmop_nonautoclave,by.x=0,by.y=0) %>%
+  group_by(date,septoria,plant,autoclave) %>%
+  dplyr::count()%>%
+  print(n=55)
+
+# Generating rarefaction curves for all samples
+rarefy.plot_v4_d10d25_nrmop_nonautoclave<-rarecurve(seqtab_v4_d10d25_nrmop_nonautoclave,tidy = TRUE)
+
+# Plotting rarefaction plots in ggplot
+rareplot_v4_d10d25_nrmop_nonautoclave<-ggplot()+
+  geom_line(data=rarefy.plot_v4_d10d25_nrmop_nonautoclave,aes(x=Sample,y=Species,color=Site))+
+  geom_vline(data=NULL,xintercept=c(1000,5000,10000,15000,20000,30000,40000))+
+  theme(legend.position="none")+
+  geom_text(data=NULL,aes(x=500,y=300,label="1000",angle=90))+
+  geom_text(data=NULL,aes(x=4000,y=300,label="5000",angle=90))+
+  geom_text(data=NULL,aes(x=9000,y=300,label="10000",angle=90))+
+  geom_text(data=NULL,aes(x=14000,y=300,label="15000",angle=90))+
+  geom_text(data=NULL,aes(x=19000,y=300,label="20000",angle=90))+
+  geom_text(data=NULL,aes(x=29000,y=300,label="30000",angle=90))+
+  geom_text(data=NULL,aes(x=39000,y=300,label="40000",angle=90))
+
+rareplot_v4_d10d25_nrmop_nonautoclave
+
+sort(rowSums(seqtab_v4_d10d25_nrmop_nonautoclave))
+
+# Rarefying the ASV table to 10000 sequences
+rare.asv.tab_v4_d10d25_nrmop_nonautoclave<-as.data.frame(rrarefy(seqtab_v4_d10d25_nrmop_nonautoclave, sample=21939))
+
+# Removing samples that do not meet rarefaction cut-off and ASVs with zero reads following rarefaction.
+rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave<-rarefy_formatting(rare.asv.tab_v4_d10d25_nrmop_nonautoclave,21939)
+
+#write.table(rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave,"~/OneDrive - Oak Ridge National Laboratory/septoria_in_a_bag/v4_data/rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave.txt",row.names = TRUE,col.names=TRUE,sep = '\t')
+```
+
+# Comparisons of bacterial communities within autoclaved soils only
+
+```{r}
+# loading in nonautoclaved rarefied ASV table 
+rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave<-read.table("~/OneDrive - Oak Ridge National Laboratory/septoria_in_a_bag/v4_data/rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave.txt",header=TRUE,sep='\t')
+
+# Adding metadata
+metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave<-merge(sample.metadata,rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave,by.x=0,by.y=0)
+
+# Tabulating summaries
+metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave %>%
+  group_by(date,septoria,plant,autoclave) %>%
+  dplyr::count()%>%
+  print(n=55)
+
+# Beta-Diversity for all nonautoclaved samples regardless of sampling date
+pcoa_v4_within_nonautoclave<-pcoa_imager(metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave,method = "bray",color="date",shape="septoria",polygon=TRUE,color_two="plant")
+pcoa_v4_within_nonautoclave[[1]]
+pcoa_v4_within_nonautoclave_plot<-pcoa_v4_within_nonautoclave[[2]]+
+  guides(fill=guide_legend("Septoria Isolate"),color=guide_legend("Day"),shape=guide_legend("Septoria Isolate"))+
+  scale_fill_discrete(labels=c("No Plant","Plant"))+
+  scale_color_discrete(labels=c("Day 10","Day 25"))+
+  scale_shape_discrete(labels=c("Mn5 (High Virulence)","Control","SARM07 (Low Virulence)"))
+pcoa_v4_within_nonautoclave_plot
+
+# PERMANOVA
+adonis2(Filter(is.numeric,metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave)~metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave$plant*metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave$date*metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave$septoria)
+
+```
+
+
+# Separating the autoclaved soil fungal communities by date starting with day 10. 
+
+```{r}
+# loading in rarefied nonautoclaved ASV table
+rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave<-read.table("~/OneDrive - Oak Ridge National Laboratory/septoria_in_a_bag/v4_data/rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave.txt",header=TRUE,sep='\t')
+
+colnames(rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave)<-sub("\\."," ",colnames(rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave))
+
+# Adding metadata
+metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave<-merge(sample.metadata,rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave,by.x=0,by.y=0)
+
+# Pulling out day 10 samples only
+metadata.rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10<-metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave[grep("D10",metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave$date),]
+
+relative_abundance_plots(metadata=sample.metadata,taxonomy_table = tax.tab_v4,asv.table=rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave,grouping.var=sept_plant,taxon_level = Family,cut_off=0.005)
+
+# Tabulating summaries
+metadata.rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10 %>%
+  group_by(date,septoria,plant,autoclave) %>%
+  dplyr::count()%>%
+  print(n=55)
+
+# Beta-Diversity for all nonautoclaved samples regardless of sampling date
+pcoa_v4_within_nonautoclave_d10<-pcoa_imager(metadata.rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10,method="bray",color="sept_plant",shape="septoria",polygon=TRUE,color_two="plant")
+pcoa_v4_within_nonautoclave_d10[[1]]
+pcoa_v4_within_nonautoclave_d10_plot<-pcoa_v4_within_nonautoclave_d10[[2]]+
+  guides(fill=guide_legend("Plant Presence"),color=guide_legend("Septoria Isolate x Plant Presence"),shape=guide_legend("Septoria Isolate"))+
+  scale_fill_discrete(labels=c("No Plant","Plant"))+
+  scale_shape_discrete(labels=c("Mn5 (High Virulence)","Control","SARM07 (Low Virulence)"))+
+  scale_color_discrete(labels=c("Mn5 (High Virulence) x No Plant","Control x No Plant","SARM07 (Low Virulence) x No Plant","Mn5 (High Virulence) x Plant","Control x Plant","SARM07 (Low Virulence) x Plant"))
+pcoa_v4_within_nonautoclave_d10_plot
+
+# PERMANOVA
+adonis2(Filter(is.numeric,metadata.rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10)~metadata.rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10$plant*metadata.rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10$septoria)
+
+# General Alpha-Diversity
+alpha.diversity_nrmop_nonautoclave_d10<-data.frame(Filter(x = metadata.rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10,f=is.character),q0=hill_taxa(Filter(x=metadata.rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10,f=is.numeric),q=0),q1=hill_taxa(Filter(x=metadata.rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10,f=is.numeric),q=1),q2=hill_taxa(Filter(x=metadata.rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10,f=is.numeric),q=2))
+
+# ANOVA q0
+anova.alpha.diversity_nonautoclave_d10_q0<-aov(q0~plant*septoria,data = alpha.diversity_nrmop_nonautoclave_d10)
+par(mfrow=c(2,2))
+plot(anova.alpha.diversity_nonautoclave_d10_q0)
+car::Anova(anova.alpha.diversity_nonautoclave_d10_q0,type="III")
+TukeyHSD(anova.alpha.diversity_nonautoclave_d10_q0)
+
+# ANOVA q1
+anova.alpha.diversity_nonautoclave_d10_q1<-aov(q1~plant*septoria,data = alpha.diversity_nrmop_nonautoclave_d10)
+par(mfrow=c(2,2))
+plot(anova.alpha.diversity_nonautoclave_d10_q1)
+car::Anova(anova.alpha.diversity_nonautoclave_d10_q1,type="III")
+TukeyHSD(anova.alpha.diversity_nonautoclave_d10_q1)
+
+# ANOVA q2
+anova.alpha.diversity_nonautoclave_d10_q2<-aov(q2~plant*septoria,data = alpha.diversity_nrmop_nonautoclave_d10)
+par(mfrow=c(2,2))
+plot(anova.alpha.diversity_nonautoclave_d10_q2)
+car::Anova(anova.alpha.diversity_nonautoclave_d10_q2,type="III")
+TukeyHSD(anova.alpha.diversity_nonautoclave_d10_q2)
+
+# Converting to long format to plot in ggplot
+alpha.diversity_nrmop_nonautoclave_d10_long<-gather(alpha.diversity_nrmop_nonautoclave_d10,key="q",value="index",12:14)
+
+# Plotting in ggplot
+alpha.diversity_v4_nrmop_nonautoclave_d10_plot<-ggplot(alpha.diversity_nrmop_nonautoclave_d10_long,aes(x=plant,y=index,fill=septoria))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(inherit.aes=FALSE,aes(x=plant,y=index,fill=septoria),shape=21,color="black",alpha=0.9,position=position_jitterdodge(dodge.width = .90))+
+  facet_wrap(.~q,scales = "free_y")+
+  theme(panel.grid=element_blank(),panel.border = element_rect(color="black",fill=NA),panel.background = element_rect(fill="white"))+
+  scale_x_discrete(labels=c("No Plant","Plant"))+
+  ylab("Index Value")+
+  xlab("Plant Presence")+
+  scale_fill_discrete(labels=c("Mn5 (High Virulence)","Control","SARM07 (Low Virulence)"))+
+  scale_color_discrete(labels=c("Mn5 (High Virulence)","Control","SARM07 (Low Virulence)"))+
+  guides(fill=guide_legend("Septoria Isolate"),color=guide_legend("Septoria Isolate"))
+  
+  
+alpha.diversity_v4_nrmop_nonautoclave_d10_plot
+```
+
+# PIME Analysis for Day 10 nonautoclaved Soils
+
+```{r}
+# loading in rarefied nonautoclaved ASV table
+rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave<-read.table("~/OneDrive - Oak Ridge National Laboratory/septoria_in_a_bag/v4_data/rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave.txt",header=TRUE,sep='\t')
+
+# Removing period in ASV labels and replacing with space. 
+colnames(rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave)<-sub("\\."," ",colnames(rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave))
+
+# Loading in sample metadata
+sample.metadata<-read.table("~/OneDrive - Oak Ridge National Laboratory/septoria_in_a_bag/sample_metadata_from_sample_names.txt",header=TRUE,sep='\t',na.strings = "-")
+
+# Adding metadata
+metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave<-merge(sample.metadata,rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave,by.x=0,by.y=0)
+
+# Pulling out day 10 samples only
+metadata.rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10<-metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave[grep("D10",metadata.rare.asv.tab.fmt_v4_d10d25_nrmop_nonautoclave$date),]
+
+# Adding row names to metadata file to allow for creation of phyloseq object
+row.names(metadata.rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10)<-metadata.rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10$Row.names
+
+# Creating an OTU table for the phyloseq object
+rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10_otu_table<-phyloseq::otu_table(object=Filter(x=metadata.rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10,f=is.numeric),taxa_are_rows = FALSE)
+
+# Creating a taxonomy table for the phyloseq object
+rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10_tax_table<-phyloseq::tax_table(as.matrix(subset(tax.tab_v4,row.names(tax.tab_v4)%in%colnames(Filter(metadata.rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10,f=is.numeric)))))
+
+# Creating a metadata file for the phyloseq object
+rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10_metadata<-phyloseq::sample_data(metadata.rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10[,2:11])
+
+# Creating phyloseq object
+rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10_phyloseq_obj<-phyloseq::phyloseq(rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10_otu_table,rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10_tax_table,rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10_metadata)
+
+# Estimating the out of bag error rate prior to prevalence filtering
+pime.oob.error(rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10_phyloseq_obj,"septoria")
+
+# Splitting data by sphaerulina and plant treatment
+pime.variable.split_nrmop_nonautoclave_d10<-pime.split.by.variable(rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10_phyloseq_obj,"septoria")
+
+# Creating prevalence intervals for each sphaerulina/plant treatment combination
+pime.prevalence_nrmop_nonautoclave_d10<-pime.prevalence(pime.variable.split_nrmop_nonautoclave_d10)
+
+# Calculating the random forest error rate for each possible prevalence (in increments of 5)
+set.seed(42)
+pime.best.prevalence_nrmop_nonautoclave_d10<-pime.best.prevalence(pime.prevalence_nrmop_nonautoclave_d10,"septoria")
+
+# Pulling out the important ASVs for the model with a low error rate
+pime.prevalence.filtered.important.asvs_nrmop_nonautoclave_d10<-as.data.frame(pime.best.prevalence_nrmop_nonautoclave_d10$Importance$`Prevalence 85`)
+
+# Pulling out the phyloseq object for the model with a low error rate
+pime.prevalence.filtered.asv.phyloseq_nrmop_nonautoclave_d10<-pime.prevalence_nrmop_nonautoclave_d10$'85'
+
+# Assessing model reliability by assigning treatments randomly to samples and computing error rate (expect that it should be an error rate greater than the model error rate when using the actual sample designations that does not change regardless of prevalence filtering). 
+pime.randomized.model_nrmop_nonautoclave_d10<-pime.error.prediction(rare.asv.tab.fmt_v4_nrmop_nonautoclave_d10_phyloseq_obj, "sept_plant", bootstrap = 100, parallel = TRUE, max.prev = 95)
+pime.randomized.model_nrmop_nonautoclave_d10$Plot
+
+# Assessing model error rates over multiple bootstrap replicates
+replicated.oob.error_nrmop_nonautoclave_d10 <- pime.oob.replicate(pime.prevalence_nrmop_nonautoclave_d10, "sept_plant", bootstrap = 100, parallel = TRUE)
+replicated.oob.error_nrmop_nonautoclave_d10$Plot
+
+# Pulling out the ASV table from the phyloseq object from the prevalence filtered object
+pime.prevalence.filtered.asv.table_nrmop_nonautoclave_d10<-as.data.frame(pime.prevalence.filtered.asv.phyloseq_nrmop_nonautoclave_d10@otu_table)
+
+# Pulling out the sample metadata from the phyloseq object from the prevalence filtered object
+pime.prevalence.filtered.metadata_nrmop_nonautoclave_d10<-as.data.frame(pime.prevalence.filtered.asv.phyloseq_nrmop_nonautoclave_d10@sam_data)
+
+# Pulling out the taxonomy table from the phyloseq object from the prevalence filtered object
+pime.prevalence.filtered.taxonomy_nrmop_nonautoclave_d10<-as.data.frame(pime.prevalence.filtered.asv.phyloseq_nrmop_nonautoclave_d10@tax_table)
+
+# Removing the period from the ASV labels to match with the original sequence IDs
+pime.prevalence.filtered.important.asvs_nrmop_nonautoclave_d10$SequenceID<-sub("\\."," ",pime.prevalence.filtered.important.asvs_nrmop_nonautoclave_d10$SequenceID)
+
+# Creating new labels to use for ASV importance plot that include the sequence id (ASV and number) and the family assignment
+pime.prevalence.filtered.important.asvs_nrmop_nonautoclave_d10$tax_id<-sub("f__","",paste0(pime.prevalence.filtered.important.asvs_nrmop_nonautoclave_d10$SequenceID,"_",pime.prevalence.filtered.important.asvs_nrmop_nonautoclave_d10$Family))
+
+# Adjusting labels for the plot to make it look slightly more visually appealing.
+pime.prevalence.filtered.important.asvs_nrmop_nonautoclave_d10$tax_id<-sub("asv_v4 ","asv.v4.",pime.prevalence.filtered.important.asvs_nrmop_nonautoclave_d10$tax_id)
+
+# Plotting the ASV contributions to model error rates. This will highlight Sphaerulina ASVs in red
+ggplot(data=pime.prevalence.filtered.important.asvs_nrmop_nonautoclave_d10,aes(x=reorder(tax_id,MeanDecreaseAccuracy),y=MeanDecreaseAccuracy*100))+
+  geom_col()+
+  ylab("Mean Decrease in Model Accuracy (%)")+
+  xlab("ASV")+
+  coord_flip()+
+  theme(panel.grid=element_blank(),panel.border = element_rect(color="black",fill=NA),panel.background = element_rect(fill="white"))
+
+pime.prevalence.filtered.metadata.asv.table_nrmop_nonautoclave_d10<-merge(pime.prevalence.filtered.metadata_nrmop_nonautoclave_d10,pime.prevalence.filtered.asv.table_nrmop_nonautoclave_d10,by=0)
+
+relative_abundance_plots(metadata = pime.prevalence.filtered.metadata_nrmop_nonautoclave_d10,taxonomy_table = pime.prevalence.filtered.taxonomy_nrmop_nonautoclave_d10,asv.table = pime.prevalence.filtered.asv.table_nrmop_nonautoclave_d10,grouping.var = sept_plant,taxon_level = Family,cut_off = 0.01)
+
+# PCoA for nonautoclaved soils without sphaerulina
+pcoa_v4_within_nonautoclave_d10_core<-pcoa_imager(pime.prevalence.filtered.metadata.asv.table_nrmop_nonautoclave_d10,method = "bray",color="sept_plant",shape="septoria",polygon=TRUE,color_two="plant")
+pcoa_v4_within_nonautoclave_d10_core[[1]]
+
+pcoa_v4_within_nonautoclave_d10_core_plot<-pcoa_v4_within_nonautoclave_d10_core[[2]]+
+  guides(fill=guide_legend("Plant Presence"),color=guide_legend("Sphaerulina Isolate x Plant Presence"),shape=guide_legend("Sphaerulina Isolate"))+
+  scale_fill_discrete(labels=c("No Plant","Plant"))+
+  scale_shape_discrete(labels=c("Mn5 (High Virulence)","Control","SARM07 (Low Virulence)"))+
+  scale_color_discrete(labels=c("Mn5 (High Virulence) x No Plant","Control x No Plant","SARM07 (Low Virulence) x No Plant","Mn5 (High Virulence) x Plant","Control x Plant","SARM07 (Low Virulence) x Plant"))
+pcoa_v4_within_nonautoclave_d10_core_plot
+
+# PERMANOVA for nonautoclaved soils without Sphaerulina
+adonis2(select_if(pime.prevalence.filtered.metadata.asv.table_nrmop_nonautoclave_d10,is.numeric)~pime.prevalence.filtered.metadata.asv.table_nrmop_nonautoclave_d10$septoria*pime.prevalence.filtered.metadata.asv.table_nrmop_nonautoclave_d10$plant)
+```

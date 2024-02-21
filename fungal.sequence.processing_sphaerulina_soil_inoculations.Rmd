@@ -1,0 +1,812 @@
+---
+title: "Septoria in a bag soil ITS data"
+author: "Aaron Onufrak"
+date: "1/20/2024"
+output: rmdformats::downcute
+editor_options: 
+  chunk_output_type: console
+bibliography: endnote_for_r.bibtex
+link-citations: yes
+csl: https://raw.githubusercontent.com/citation-style-language/styles/master/nature.csl
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message="hide", warning=FALSE,cache=TRUE)
+```
+
+# **Project Summary** 
+
+The following code describes the sequence processing steps used to analyze **ITS2** data generated for the **septora-in-a-bag** project. Data comes from DNA extracted from soils. Soils were collected from pots that were amended with either a natural forest soil or an autoclaved forest soil. After soil amendments, *Populus trichocarpa* (black cottonwood) was planted in a subset of pots. The two different strains *Septoria musiva* (AKA *Sphaerulina musiva*) were added to pots. One strain was determined to be high virulence and the other was determined to be low virulence. Soils were collected from three different locations within the pots. 
+
+**Treatments**
+
+**Inoculum Type**
+
+1. **No Septoria** == NoSept
+2. **High Virulence Septoria** == Mn5
+3. **Low Virulence Septoria** == SARM07
+
+**Sampling Date**
+
+1. **Day 10** == D10
+2. **Day 25** == D25
+
+**Soil Amendment Type**
+
+1. **Autoclaved/Reduced Soil Community** == A
+2. **Not-Autoclaved/Full Community** == NA
+
+**Plant Presence**
+
+1. **No Plant in Pot** == NP
+2. **Plant in Pot** == P
+
+**Soil Collection Location**
+
+1. **Near Root** == NR
+2. **Middle of Pot** == MoP
+3. **Edge of Pot** == EoP
+
+
+## **Load Packages**
+Below I load in the packages required to complete the sequence processing and statistical analyses. 
+```{r}
+#Load Packages
+library(dada2)
+library(Biostrings)
+library(ShortRead)
+library(reticulate)
+library(tidyr)
+library(dplyr)
+```
+
+# **Sequence Processing**
+
+## **Step 1: Path Designations and Quality Assessment**
+First I designate the path for the directory that contains the raw ITS2 sequence data. I then create two objects, one for forward paths and the other for reverse paths. I then assess quality of raw data. 
+```{r}
+# Creates an object that has the pathway for the sequence directory
+soil_its_path_p2<-"/Users/5io/Documents/septoria_in_a_bag/its_data/sequence_data/221013_Cregger_AC-SEED_Jo-Soil_Final_P2_ITS_KJR4Y/BaseCalls"
+
+# Lists the files present in the sequence directory
+list.files(soil_its_path_p2)
+
+# Creates objects for the forward and reverse reads
+forwardreads_its_soil_p2<-sort(list.files(soil_its_path_p2, pattern="R1_001",full.names=TRUE))
+reversereads_its_soil_p2<-sort(list.files(soil_its_path_p2, pattern="R2_001",full.names=TRUE))
+
+# Checks number of forward and reverse files. Should be an equal number of forward and reverse files.
+length(forwardreads_its_soil_p2)
+length(reversereads_its_soil_p2)
+
+# Creates an object  that strips away the pathway information leaving behind only the filename. 
+filebasename_its_soil_p2<-basename(forwardreads_its_soil_p2)
+
+#  Uses the sub function to strip out the general file info to create sample names that are reflective of sample names in metadata sheet. 
+basename_its_soil_p2<-sub("-ITS_.*","_D10",filebasename_its_soil_p2)
+
+# Uses gsub to substitute the - for the _ which is used in the metadata sheet. 
+samplenames_its_soil_p2<-gsub("\\-","_",basename_its_soil_p2)
+
+unique(samplenames_its_soil_p2)
+
+# Generates quality plots to assess read quality. 
+forward_qual_plot_its_soil_p2_raw<-plotQualityProfile(forwardreads_its_soil_p2,aggregate = TRUE)
+forward_qual_plot_its_soil_p2_raw
+reverse_qual_plot_its_soil_p2_raw<-plotQualityProfile(reversereads_its_soil_p2,aggregate = TRUE)
+reverse_qual_plot_its_soil_p2_raw
+
+# Creates two path objects that will store the paths for the filtered forward and reverse reads. 
+forward.filtN_its_soil_p2<-file.path(soil_its_path_p2,"filtN",basename(forwardreads_its_soil_p2))
+reverse.filtN_its_soil_p2<-file.path(soil_its_path_p2,"filtN",basename(reversereads_its_soil_p2))
+
+# Filters forward and reverse reads using the filterAndTrim function. Specifying maxN=0 will indicate that sequences with at least 1 ambiguous base will be removed from the dataset. 
+filterAndTrim(forwardreads_its_soil_p2,forward.filtN_its_soil_p2,reversereads_its_soil_p2,reverse.filtN_its_soil_p2,maxN=0,multithread = FALSE)
+
+# Creates quality profiles for the pre-filtered forward and reverse reads.
+filtn_qualplot_fwd_its_soil_p2<-plotQualityProfile(forward.filtN_its_soil_p2, aggregate=TRUE)
+filtn_qualplot_fwd_its_soil_p2
+filtn_qualplot_rev_its_soil_p2<-plotQualityProfile(reverse.filtN_its_soil_p2, aggregate=TRUE)
+filtn_qualplot_rev_its_soil_p2
+
+# Creates strings that contain the forward and reverse primers used in the study.
+its3ngs1<-"CATCGATGAAGAACGCAG"
+its3ngs2<-"CAACGATGAAGAACGCAG"
+its3ngs3<-"CACCGATGAAGAACGCAG"
+its3ngs4<-"CATCGATGAAGAACGTAG"
+its3ngs5<-"CATCGATGAAGAACGTGG"
+its3ngs10<-"CATCGATGAAGAACGCTG"
+its4ngr<-"TCCTSCGCTTATTGATATGC"
+archits4<-"TCCTCGCCTTATTGATATGC"
+
+# Creates a function called allorientations to identify all potenital orientations of the primers. Then uses the complement, reverse, and reverseComplement functions to store all possible orientations of the primer in the orientations object). Finally, uses the sapply function to convert all orientations into individual strings of text. 
+allorientations<-function(primer){       
+  require(Biostrings)     
+  dna<-DNAString(primer)                                                    
+  orientations<-c(Forward=dna, Complement=Biostrings::complement(dna),Reverse=Biostrings::reverse(dna), 
+             RevComp=Biostrings::reverseComplement(dna)) 
+  return(sapply(orientations,toString))
+}
+
+# Stores all possible orientations of primers in objects for each primer.
+its3ngs1.ori<-allorientations(its3ngs1)
+its3ngs2.ori<-allorientations(its3ngs2)
+its3ngs3.ori<-allorientations(its3ngs3)
+its3ngs4.ori<-allorientations(its3ngs4)
+its3ngs5.ori<-allorientations(its3ngs5)
+its3ngs10.ori<-allorientations(its3ngs10)
+its4ngr.ori<-allorientations(its4ngr)
+archits4.ori<-allorientations(archits4)
+
+
+# Specifies the conda environment to use for cutadapt
+use_condaenv("/Users/5io/anaconda3/envs/cutadaptenv")
+
+# Uses the system2 function to pass commands to the shell to run cutadapt from R. Checking to make sure R can find Cutadapt. 
+system2("conda",args=c("run", "-n", "cutadaptenv", "cutadapt", "--version"))
+
+# Creates a directory to store the forward and reverse reads after they have been trimmed. 
+path.cut_p2<-file.path(soil_its_path_p2,"cutadapt")
+if(!dir.exists(path.cut_p2)) dir.create(path.cut_p2)
+
+forwardreads.cut_its_soil_p2<-file.path(path.cut_p2,basename(forwardreads_its_soil_p2))
+reversereads.cut_its_soil_p2<-file.path(path.cut_p2,basename(reversereads_its_soil_p2))
+
+# Creates objects containing the forward and reverse primer reverse compliment strings. Calls the rc function of the dada2 package. The rc function takes a sequence object provided by the user and creates the reverse compliment of the sequence. 
+its3ngs1.rc1<-dada2::rc(its3ngs1)
+its3ngs2.rc1<-dada2::rc(its3ngs2)
+its3ngs3.rc1<-dada2::rc(its3ngs3)
+its3ngs4.rc1<-dada2::rc(its3ngs4)
+its3ngs5.rc1<-dada2::rc(its3ngs5)
+its3ngs10.rc1<-dada2::rc(its3ngs10)
+its4ngr.rc1<-dada2::rc(its4ngr)
+archits4.rc1<-dada2::rc(archits4)
+
+# Uses the paste function to create objects that contain the flags for the potential combinations of each forward and reverse primer and the reverse compliment. These flags will serve as the arguments provided to cutadapt. The ^ at the beginning of the sequence indicates that the primer should be removed from the beginning of the sequence. 
+its3ngs1.its4.r1.flags<-paste("-a"," ", "^", its3ngs1,"...",its4ngr.rc1, sep='') 
+its3ngs1.arch.r1.flags<-paste("-a"," ", "^", its3ngs1,"...",archits4.rc1, sep='') 
+its3ngs2.its4.r1.flags<-paste("-a"," ", "^", its3ngs2,"...",its4ngr.rc1, sep='') 
+its3ngs2.arch.r1.flags<-paste("-a"," ", "^", its3ngs2,"...",archits4.rc1, sep='') 
+its3ngs3.its4.r1.flags<-paste("-a"," ", "^", its3ngs3,"...",its4ngr.rc1, sep='') 
+its3ngs3.arch.r1.flags<-paste("-a"," ", "^", its3ngs3,"...",archits4.rc1, sep='')
+its3ngs4.its4.r1.flags<-paste("-a"," ", "^", its3ngs4,"...",its4ngr.rc1, sep='') 
+its3ngs4.arch.r1.flags<-paste("-a"," ", "^", its3ngs4,"...",archits4.rc1, sep='')
+its3ngs5.its4.r1.flags<-paste("-a"," ", "^", its3ngs5,"...",its4ngr.rc1, sep='') 
+its3ngs5.arch.r1.flags<-paste("-a"," ", "^", its3ngs5,"...",archits4.rc1, sep='')
+its3ngs10.its4.r1.flags<-paste("-a"," ", "^", its3ngs10,"...",its4ngr.rc1, sep='') 
+its3ngs10.arch.r1.flags<-paste("-a"," ", "^", its3ngs10,"...",archits4.rc1, sep='')
+
+its4.its3ngs1.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs1.rc1, sep='') 
+arch.its3ngs1.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs1.rc1, sep='') 
+its4.its3ngs2.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs2.rc1, sep='') 
+arch.its3ngs2.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs2.rc1, sep='') 
+its4.its3ngs3.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs3.rc1, sep='') 
+arch.its3ngs3.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs3.rc1, sep='') 
+its4.its3ngs4.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs4.rc1, sep='') 
+arch.its3ngs4.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs4.rc1, sep='') 
+its4.its3ngs5.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs5.rc1, sep='') 
+arch.its3ngs5.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs5.rc1, sep='') 
+its4.its3ngs10.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs10.rc1, sep='') 
+arch.its3ngs10.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs10.rc1, sep='') 
+
+
+# Uses cutadapt to remove the primers from each read. Removing any read that does not have the forward primer or the reverse primer in the correct orientation.
+for (i in seq_along(forwardreads_its_soil_p2)){
+  system2("conda",args=c("run -n cutadaptenv cutadapt",
+                          its3ngs1.its4.r1.flags,
+                          its3ngs1.arch.r1.flags,
+                          its3ngs2.its4.r1.flags,
+                          its3ngs2.arch.r1.flags,
+                          its3ngs3.its4.r1.flags,
+                          its3ngs3.arch.r1.flags,
+                          its3ngs4.its4.r1.flags,
+                          its3ngs4.arch.r1.flags,
+                          its3ngs5.its4.r1.flags,
+                          its3ngs5.arch.r1.flags,
+                          its3ngs10.its4.r1.flags,
+                          its3ngs10.arch.r1.flags,
+                          its4.its3ngs1.r2.flags,
+                          arch.its3ngs1.r2.flags,
+                          its4.its3ngs2.r2.flags,
+                          arch.its3ngs2.r2.flags,
+                          its4.its3ngs3.r2.flags,
+                          arch.its3ngs3.r2.flags,
+                          its4.its3ngs4.r2.flags,
+                          arch.its3ngs4.r2.flags,
+                          its4.its3ngs5.r2.flags,
+                          arch.its3ngs5.r2.flags,
+                          its4.its3ngs10.r2.flags,
+                          arch.its3ngs10.r2.flags,
+                          "--discard-untrimmed", "--minimum-length 10",
+                          "-o",forwardreads.cut_its_soil_p2[i], "-p",reversereads.cut_its_soil_p2[i],
+                          forward.filtN_its_soil_p2[i],reverse.filtN_its_soil_p2[i]))
+}
+
+# Creating new pathways for the quality filtered forward and reverse reads. 
+filtforward_its_soil_p2<-file.path(soil_its_path_p2, "filtered", (paste0(samplenames_its_soil_p2,"_F_filt.fastq")))
+filtreverse_its_soil_p2<-file.path(soil_its_path_p2,"filtered",paste0(samplenames_its_soil_p2,"_R_filt.fastq"))
+
+filtforward_its_soil_p2[duplicated(filtforward_its_soil_p2)]<-sub("filt.fastq.gz","v2_filt.fastq",filtforward_its_soil_p2[duplicated(filtforward_its_soil_p2)])
+filtreverse_its_soil_p2[duplicated(filtreverse_its_soil_p2)]<-sub("filt.fastq.gz","v2_filt.fastq",filtreverse_its_soil_p2[duplicated(filtreverse_its_soil_p2)])
+
+# Creating quality profiles for the primer trimmed forward and reverse reads. 
+primercut_qualplot_fwd_its_soil_p2<-plotQualityProfile(forwardreads.cut_its_soil_p2, aggregate=TRUE)
+primercut_qualplot_fwd_its_soil_p2
+primercut_qualplot_rev_its_soil_p2<-plotQualityProfile(reversereads.cut_its_soil_p2, aggregate=TRUE)
+primercut_qualplot_rev_its_soil_p2
+
+# Quality filtering reads using a maximum expected error threshold of 2 for the forward and reverse reads. 
+filter.out_its_soil_p2<-filterAndTrim(fwd=forwardreads.cut_its_soil_p2, filt=filtforward_its_soil_p2, rev=reversereads.cut_its_soil_p2, filt.rev=filtreverse_its_soil_p2, maxEE=c(2,2), compress=FALSE,truncLen = 225, multithread = FALSE)
+ 
+# Converting the filter.out_its_soil_p2 object into a data frame. 
+filter.out_its_soil_p2<-as.data.frame(filter.out_its_soil_p2)
+
+# Checking to see the effects of the quality filtering on per sample read counts. 
+filter.out_its_soil_p2$diffs <- filter.out_its_soil_p2$reads.in-filter.out_its_soil_p2$reads.out
+
+# Using the order command to sort the dataframe by the new column (diffs) that created above. 
+filter.out_its_soil_p2[order(filter.out_its_soil_p2$reads.out),]
+
+# Generating quality plots for the forward and reverse reads after quality filtering
+filtered_qualplot_fwd_its_soil_p2<-plotQualityProfile(filtforward_its_soil_p2, aggregate=TRUE)
+filtered_qualplot_fwd_its_soil_p2
+filtered_qualplot_rev_its_soil_p2<-plotQualityProfile(filtreverse_its_soil_p2, aggregate=TRUE)
+filtered_qualplot_rev_its_soil_p2
+
+# Dereplicating forward and reverse reads
+derepforward_its_soil_p2<-derepFastq(filtforward_its_soil_p2,verbose=TRUE)
+derepreverse_its_soil_p2<-derepFastq(filtreverse_its_soil_p2,verbose=TRUE)
+
+# Assigning the sample names to the dereplicated sequence objects
+#names(derepforward_its_soil_p2)<-samplenames_its_soil_p2
+#names(derepreverse_its_soil_p2)<-samplenames_its_soil_p2
+
+# Learning errors for forward and reverse reads. 
+errorforward_its_soil_p2<-learnErrors(derepforward_its_soil_p2, multithread = TRUE)
+errorreverse_its_soil_p2<-learnErrors(derepreverse_its_soil_p2,multithread = TRUE)
+
+# Error plots for forward & reverse reads
+errplots_fwd_its_soil_p2<-plotErrors(errorforward_its_soil_p2, nominalQ=TRUE)
+errplots_fwd_its_soil_p2
+errplots_rev_its_soil_p2<-plotErrors(errorreverse_its_soil_p2,nominalQ = TRUE)
+errplots_rev_its_soil_p2
+
+# Denoising with dada2
+dadaforwardreads_its_soil_p2<-dada(derepforward_its_soil_p2,err=errorforward_its_soil_p2,multithread = TRUE,pool=TRUE)
+dadareversereads.ds_its_soil_p2<-dada(derepreverse_its_soil_p2,err=errorreverse_its_soil_p2,multithread = TRUE,pool=TRUE)
+
+# Merging forward and reverse reads using mergePairs.
+merge_its_soil_p2<-mergePairs(dadaforwardreads_its_soil_p2,derepforward_its_soil_p2,dadareversereads.ds_its_soil_p2,derepreverse_its_soil_p2,verbose=TRUE)
+
+# Creating a sequence table
+seqtab_its_soil_p2<-makeSequenceTable(merge_its_soil_p2)
+hist(nchar(colnames(seqtab_its_soil_p2)))
+
+# Starting P1
+
+# Creates an object that has the pathway for the sequence directory
+soil_its_path_p1<-"/Users/5io/Documents/septoria_in_a_bag/its_data/sequence_data/221007_Cregger_AC_SEED_Jo_Soil_Final_P1-ITS_KJWBP/BaseCalls"
+
+# Lists the files present in the sequence directory
+list.files(soil_its_path_p1)
+
+# Creates objects for the forward and reverse reads
+forwardreads_its_soil_p1<-sort(list.files(soil_its_path_p1, pattern="R1_001",full.names=TRUE))
+reversereads_its_soil_p1<-sort(list.files(soil_its_path_p1, pattern="R2_001",full.names=TRUE))
+
+# Checks number of forward and reverse files. Should be an equal number of forward and reverse files.
+length(forwardreads_its_soil_p1)
+length(reversereads_its_soil_p1)
+
+# Creates an object  that strips away the pathway information leaving behind only the filename. 
+filebasename_its_soil_p1<-basename(forwardreads_its_soil_p1)
+
+#  Uses the sub function to strip out the general file info to create sample names that are reflective of sample names in metadata sheet. 
+basename_its_soil_p1<-sub("-ITS_.*","_D25",filebasename_its_soil_p1)
+
+# Uses gsub to substitute the - for the _ which is used in the metadata sheet. 
+samplenames_its_soil_p1<-gsub("\\-","_",basename_its_soil_p1)
+
+unique(samplenames_its_soil_p1)
+
+# Generates quality plots to assess read quality. 
+forward_qual_plot_its_soil_p1_raw<-plotQualityProfile(forwardreads_its_soil_p1,aggregate = TRUE)
+forward_qual_plot_its_soil_p1_raw
+reverse_qual_plot_its_soil_p1_raw<-plotQualityProfile(reversereads_its_soil_p1,aggregate = TRUE)
+reverse_qual_plot_its_soil_p1_raw
+
+# Creates two path objects that will store the paths for the filtered forward and reverse reads. 
+forward.filtN_its_soil_p1<-file.path(soil_its_path_p1,"filtN",basename(forwardreads_its_soil_p1))
+reverse.filtN_its_soil_p1<-file.path(soil_its_path_p1,"filtN",basename(reversereads_its_soil_p1))
+
+# Filters forward and reverse reads using the filterAndTrim function. Specifying maxN=0 will indicate that sequences with at least 1 ambiguous base will be removed from the dataset. 
+filterAndTrim(forwardreads_its_soil_p1,forward.filtN_its_soil_p1,reversereads_its_soil_p1,reverse.filtN_its_soil_p1,maxN=0,multithread = FALSE)
+
+# Creates quality profiles for the pre-filtered forward and reverse reads.
+filtn_qualplot_fwd_its_soil_p1<-plotQualityProfile(forward.filtN_its_soil_p1, aggregate=TRUE)
+filtn_qualplot_fwd_its_soil_p1
+filtn_qualplot_rev_its_soil_p1<-plotQualityProfile(reverse.filtN_its_soil_p1, aggregate=TRUE)
+filtn_qualplot_rev_its_soil_p1
+
+# Creates strings that contain the forward and reverse primers used in the study.
+its3ngs1<-"CATCGATGAAGAACGCAG"
+its3ngs2<-"CAACGATGAAGAACGCAG"
+its3ngs3<-"CACCGATGAAGAACGCAG"
+its3ngs4<-"CATCGATGAAGAACGTAG"
+its3ngs5<-"CATCGATGAAGAACGTGG"
+its3ngs10<-"CATCGATGAAGAACGCTG"
+its4ngr<-"TCCTSCGCTTATTGATATGC"
+archits4<-"TCCTCGCCTTATTGATATGC"
+
+# Creates a function called allorientations to identify all potenital orientations of the primers. Then uses the complement, reverse, and reverseComplement functions to store all possible orientations of the primer in the orientations object). Finally, uses the sapply function to convert all orientations into individual strings of text. 
+allorientations<-function(primer){       
+  require(Biostrings)     
+  dna<-DNAString(primer)                                                    
+  orientations<-c(Forward=dna, Complement=Biostrings::complement(dna),Reverse=Biostrings::reverse(dna), 
+             RevComp=Biostrings::reverseComplement(dna)) 
+  return(sapply(orientations,toString))
+}
+
+# Stores all possible orientations of primers in objects for each primer.
+its3ngs1.ori<-allorientations(its3ngs1)
+its3ngs2.ori<-allorientations(its3ngs2)
+its3ngs3.ori<-allorientations(its3ngs3)
+its3ngs4.ori<-allorientations(its3ngs4)
+its3ngs5.ori<-allorientations(its3ngs5)
+its3ngs10.ori<-allorientations(its3ngs10)
+its4ngr.ori<-allorientations(its4ngr)
+archits4.ori<-allorientations(archits4)
+
+# Counts occurences of the primers by creating a function called primeroccurences.This function will use the vcountPattern function which will return a vector containing the number of times a particular primer is detected in a sequence and the readFastq function which will take all fastq files in a particular director and turn them into a single object.  
+primeroccurences<-function(primer, directory) { 
+  nhits<-vcountPattern(primer, sread(readFastq(directory)),fixed=FALSE) 
+  return(sum(nhits>0))
+}
+
+# Specifies the conda environment to use for cutadapt
+use_condaenv("/Users/5io/anaconda3/envs/cutadaptenv")
+
+# Uses the system2 function to pass commands to the shell to run cutadapt from R. Checking to make sure R can find Cutadapt. 
+system2("conda",args=c("run", "-n", "cutadaptenv", "cutadapt", "--version"))
+
+# Creates a directory to store the forward and reverse reads after they have been trimmed. 
+path.cut_p1<-file.path(soil_its_path_p1,"cutadapt")
+if(!dir.exists(path.cut_p1)) dir.create(path.cut_p1)
+
+forwardreads.cut_its_soil_p1<-file.path(path.cut_p1,basename(forwardreads_its_soil_p1))
+reversereads.cut_its_soil_p1<-file.path(path.cut_p1,basename(reversereads_its_soil_p1))
+
+# Creates objects containing the forward and reverse primer reverse compliment strings. Calls the rc function of the dada2 package. The rc function takes a sequence object provided by the user and creates the reverse compliment of the sequence. 
+its3ngs1.rc1<-dada2::rc(its3ngs1)
+its3ngs2.rc1<-dada2::rc(its3ngs2)
+its3ngs3.rc1<-dada2::rc(its3ngs3)
+its3ngs4.rc1<-dada2::rc(its3ngs4)
+its3ngs5.rc1<-dada2::rc(its3ngs5)
+its3ngs10.rc1<-dada2::rc(its3ngs10)
+its4ngr.rc1<-dada2::rc(its4ngr)
+archits4.rc1<-dada2::rc(archits4)
+
+# Uses the paste function to create objects that contain the flags for the potential combinations of each forward and reverse primer and the reverse compliment. These flags will serve as the arguments provided to cutadapt. The ^ at the beginning of the sequence indicates that the primer should be removed from the beginning of the sequence. 
+its3ngs1.its4.r1.flags<-paste("-a"," ", "^", its3ngs1,"...",its4ngr.rc1, sep='') 
+its3ngs1.arch.r1.flags<-paste("-a"," ", "^", its3ngs1,"...",archits4.rc1, sep='') 
+its3ngs2.its4.r1.flags<-paste("-a"," ", "^", its3ngs2,"...",its4ngr.rc1, sep='') 
+its3ngs2.arch.r1.flags<-paste("-a"," ", "^", its3ngs2,"...",archits4.rc1, sep='') 
+its3ngs3.its4.r1.flags<-paste("-a"," ", "^", its3ngs3,"...",its4ngr.rc1, sep='') 
+its3ngs3.arch.r1.flags<-paste("-a"," ", "^", its3ngs3,"...",archits4.rc1, sep='')
+its3ngs4.its4.r1.flags<-paste("-a"," ", "^", its3ngs4,"...",its4ngr.rc1, sep='') 
+its3ngs4.arch.r1.flags<-paste("-a"," ", "^", its3ngs4,"...",archits4.rc1, sep='')
+its3ngs5.its4.r1.flags<-paste("-a"," ", "^", its3ngs5,"...",its4ngr.rc1, sep='') 
+its3ngs5.arch.r1.flags<-paste("-a"," ", "^", its3ngs5,"...",archits4.rc1, sep='')
+its3ngs10.its4.r1.flags<-paste("-a"," ", "^", its3ngs10,"...",its4ngr.rc1, sep='') 
+its3ngs10.arch.r1.flags<-paste("-a"," ", "^", its3ngs10,"...",archits4.rc1, sep='')
+
+its4.its3ngs1.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs1.rc1, sep='') 
+arch.its3ngs1.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs1.rc1, sep='') 
+its4.its3ngs2.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs2.rc1, sep='') 
+arch.its3ngs2.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs2.rc1, sep='') 
+its4.its3ngs3.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs3.rc1, sep='') 
+arch.its3ngs3.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs3.rc1, sep='') 
+its4.its3ngs4.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs4.rc1, sep='') 
+arch.its3ngs4.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs4.rc1, sep='') 
+its4.its3ngs5.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs5.rc1, sep='') 
+arch.its3ngs5.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs5.rc1, sep='') 
+its4.its3ngs10.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs10.rc1, sep='') 
+arch.its3ngs10.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs10.rc1, sep='') 
+
+
+# Uses cutadapt to remove the primers from each read. Removing any read that does not have the forward primer or the reverse primer in the correct orientation.
+for (i in seq_along(forwardreads_its_soil_p1)){
+  system2("conda",args=c("run -n cutadaptenv cutadapt",
+                          its3ngs1.its4.r1.flags,
+                          its3ngs1.arch.r1.flags,
+                          its3ngs2.its4.r1.flags,
+                          its3ngs2.arch.r1.flags,
+                          its3ngs3.its4.r1.flags,
+                          its3ngs3.arch.r1.flags,
+                          its3ngs4.its4.r1.flags,
+                          its3ngs4.arch.r1.flags,
+                          its3ngs5.its4.r1.flags,
+                          its3ngs5.arch.r1.flags,
+                          its3ngs10.its4.r1.flags,
+                          its3ngs10.arch.r1.flags,
+                          its4.its3ngs1.r2.flags,
+                          arch.its3ngs1.r2.flags,
+                          its4.its3ngs2.r2.flags,
+                          arch.its3ngs2.r2.flags,
+                          its4.its3ngs3.r2.flags,
+                          arch.its3ngs3.r2.flags,
+                          its4.its3ngs4.r2.flags,
+                          arch.its3ngs4.r2.flags,
+                          its4.its3ngs5.r2.flags,
+                          arch.its3ngs5.r2.flags,
+                          its4.its3ngs10.r2.flags,
+                          arch.its3ngs10.r2.flags,
+                          "--discard-untrimmed", "--minimum-length 10",
+                          "-o",forwardreads.cut_its_soil_p1[i], "-p",reversereads.cut_its_soil_p1[i],
+                          forward.filtN_its_soil_p1[i],reverse.filtN_its_soil_p1[i]))
+}
+
+
+# Creating new pathways for the quality filtered forward and reverse reads. 
+filtforward_its_soil_p1<-file.path(soil_its_path_p1, "filtered", (paste0(samplenames_its_soil_p1,"_F_filt.fastq")))
+filtreverse_its_soil_p1<-file.path(soil_its_path_p1,"filtered",paste0(samplenames_its_soil_p1,"_R_filt.fastq"))
+
+filtforward_its_soil_p1[duplicated(filtforward_its_soil_p1)]<-sub("filt.fastq.gz","v2_filt.fastq",filtforward_its_soil_p1[duplicated(filtforward_its_soil_p1)])
+filtreverse_its_soil_p1[duplicated(filtreverse_its_soil_p1)]<-sub("filt.fastq.gz","v2_filt.fastq",filtreverse_its_soil_p1[duplicated(filtreverse_its_soil_p1)])
+
+# Creating quality profiles for the primer trimmed forward and reverse reads. 
+primercut_qualplot_fwd_its_soil_p1<-plotQualityProfile(forwardreads.cut_its_soil_p1, aggregate=TRUE)
+primercut_qualplot_fwd_its_soil_p1
+primercut_qualplot_rev_its_soil_p1<-plotQualityProfile(reversereads.cut_its_soil_p1, aggregate=TRUE)
+primercut_qualplot_rev_its_soil_p1
+
+# Quality filtering reads using a maximum expected error threshold of 2 for the forward and reverse reads. 
+filter.out_its_soil_p1<-filterAndTrim(fwd=forwardreads.cut_its_soil_p1, filt=filtforward_its_soil_p1, rev=reversereads.cut_its_soil_p1, filt.rev=filtreverse_its_soil_p1, maxEE=c(2,2), compress=FALSE,truncLen = 225, multithread = FALSE)
+ 
+# Converting the filter.out_its_soil_p1 object into a data frame. 
+filter.out_its_soil_p1<-as.data.frame(filter.out_its_soil_p1)
+
+# Checking to see the effects of the quality filtering on per sample read counts. 
+filter.out_its_soil_p1$diffs <- filter.out_its_soil_p1$reads.in-filter.out_its_soil_p1$reads.out
+
+# Using the order command to sort the dataframe by the new column (diffs) that created above. 
+filter.out_its_soil_p1[order(filter.out_its_soil_p1$reads.out),]
+
+filtforward_its_soil_p1_no_missing<-filtforward_its_soil_p1[grep("NTC_2ndAMP_S98_L001_R1_001.fastq.gz_F_filt.fastq",filtforward_its_soil_p1,invert = TRUE)]
+filtreverse_its_soil_p1_no_missing<-filtreverse_its_soil_p1[grep("NTC_2ndAMP_S98_L001_R1_001.fastq.gz_R_filt.fastq",filtreverse_its_soil_p1,invert = TRUE)]
+
+# Generating quality plots for the forward and reverse reads after quality filtering
+filtered_qualplot_fwd_its_soil_p1<-plotQualityProfile(filtforward_its_soil_p1_no_missing, aggregate=TRUE)
+filtered_qualplot_fwd_its_soil_p1
+filtered_qualplot_rev_its_soil_p1<-plotQualityProfile(filtreverse_its_soil_p1_no_missing, aggregate=TRUE)
+filtered_qualplot_rev_its_soil_p1
+
+# Dereplicating forward and reverse reads
+derepforward_its_soil_p1<-derepFastq(filtforward_its_soil_p1_no_missing,verbose=TRUE)
+derepreverse_its_soil_p1<-derepFastq(filtreverse_its_soil_p1_no_missing,verbose=TRUE)
+
+# Assigning the sample names to the dereplicated sequence objects
+#names(derepforward_its_soil_p1)<-samplenames_its_soil_p1
+#names(derepreverse_its_soil_p1)<-samplenames_its_soil_p1
+
+# Learning errors for forward and reverse reads. 
+errorforward_its_soil_p1<-learnErrors(derepforward_its_soil_p1, multithread = TRUE)
+errorreverse_its_soil_p1<-learnErrors(derepreverse_its_soil_p1,multithread = TRUE)
+
+# Error plots for forward & reverse reads
+errplots_fwd_its_soil_p1<-plotErrors(errorforward_its_soil_p1, nominalQ=TRUE)
+errplots_fwd_its_soil_p1
+errplots_rev_its_soil_p1<-plotErrors(errorreverse_its_soil_p1,nominalQ = TRUE)
+errplots_rev_its_soil_p1
+
+
+# Denoising with dada2
+dadaforwardreads_its_soil_p1<-dada(derepforward_its_soil_p1,err=errorforward_its_soil_p1,multithread = TRUE,pool=TRUE)
+dadareversereads.ds_its_soil_p1<-dada(derepreverse_its_soil_p1,err=errorreverse_its_soil_p1,multithread = TRUE,pool=TRUE)
+
+
+# Merging forward and reverse reads using mergePairs.
+merge_its_soil_p1<-mergePairs(dadaforwardreads_its_soil_p1,derepforward_its_soil_p1,dadareversereads.ds_its_soil_p1,derepreverse_its_soil_p1,verbose=TRUE,minOverlap = 12)
+
+# Creating a sequence table
+seqtab_its_soil_p1<-makeSequenceTable(merge_its_soil_p1)
+hist(nchar(colnames(seqtab_its_soil_p1)))
+
+
+
+# Starting INITIAL
+
+
+# Creates an object that has the pathway for the sequence directory
+soil_its_path_initial<-"/Users/5io/Documents/septoria_in_a_bag/its_data/sequence_data/230628_M02014_Cregger_AC_SepBag_Initial_ITS_EvSeq_Michener_KM2P9/BaseCalls"
+
+# Lists the files present in the sequence directory
+list.files(soil_its_path_initial)
+
+# Creates objects for the forward and reverse reads
+forwardreads_its_soil_initial<-sort(list.files(soil_its_path_initial, pattern="R1_001",full.names=TRUE))
+reversereads_its_soil_initial<-sort(list.files(soil_its_path_initial, pattern="R2_001",full.names=TRUE))
+
+# Checks number of forward and reverse files. Should be an equal number of forward and reverse files.
+length(forwardreads_its_soil_initial)
+length(reversereads_its_soil_initial)
+
+# Creates an object  that strips away the pathway information leaving behind only the filename. 
+filebasename_its_soil_initial<-basename(forwardreads_its_soil_initial)
+
+#  Uses the sub function to strip out the general file info to create sample names that are reflective of sample names in metadata sheet. 
+basename_its_soil_initial<-sub("-ITS_.*","_initial",filebasename_its_soil_initial)
+
+# Uses gsub to substitute the - for the _ which is used in the metadata sheet. 
+samplenames_its_soil_initial<-gsub("\\-","_",basename_its_soil_initial)
+
+unique(samplenames_its_soil_initial)
+
+# Generates quality plots to assess read quality. 
+forward_qual_plot_its_soil_initial_raw<-plotQualityProfile(forwardreads_its_soil_initial,aggregate = TRUE)
+forward_qual_plot_its_soil_initial_raw
+reverse_qual_plot_its_soil_initial_raw<-plotQualityProfile(reversereads_its_soil_initial,aggregate = TRUE)
+reverse_qual_plot_its_soil_initial_raw
+
+# Creates two path objects that will store the paths for the filtered forward and reverse reads. 
+forward.filtN_its_soil_initial<-file.path(soil_its_path_initial,"filtN",basename(forwardreads_its_soil_initial))
+reverse.filtN_its_soil_initial<-file.path(soil_its_path_initial,"filtN",basename(reversereads_its_soil_initial))
+
+# Filters forward and reverse reads using the filterAndTrim function. Specifying maxN=0 will indicate that sequences with at least 1 ambiguous base will be removed from the dataset. 
+filterAndTrim(forwardreads_its_soil_initial,forward.filtN_its_soil_initial,reversereads_its_soil_initial,reverse.filtN_its_soil_initial,maxN=0,multithread = FALSE)
+
+# Creates quality profiles for the pre-filtered forward and reverse reads.
+filtn_qualplot_fwd_its_soil_initial<-plotQualityProfile(forward.filtN_its_soil_initial, aggregate=TRUE)
+filtn_qualplot_fwd_its_soil_initial
+filtn_qualplot_rev_its_soil_initial<-plotQualityProfile(reverse.filtN_its_soil_initial, aggregate=TRUE)
+filtn_qualplot_rev_its_soil_initial
+
+# Creates strings that contain the forward and reverse primers used in the study.
+its3ngs1<-"CATCGATGAAGAACGCAG"
+its3ngs2<-"CAACGATGAAGAACGCAG"
+its3ngs3<-"CACCGATGAAGAACGCAG"
+its3ngs4<-"CATCGATGAAGAACGTAG"
+its3ngs5<-"CATCGATGAAGAACGTGG"
+its3ngs10<-"CATCGATGAAGAACGCTG"
+its4ngr<-"TCCTSCGCTTATTGATATGC"
+archits4<-"TCCTCGCCTTATTGATATGC"
+
+# Creates a function called allorientations to identify all potenital orientations of the primers. Then uses the complement, reverse, and reverseComplement functions to store all possible orientations of the primer in the orientations object). Finally, uses the sapply function to convert all orientations into individual strings of text. 
+allorientations<-function(primer){       
+  require(Biostrings)     
+  dna<-DNAString(primer)                                                    
+  orientations<-c(Forward=dna, Complement=Biostrings::complement(dna),Reverse=Biostrings::reverse(dna), 
+             RevComp=Biostrings::reverseComplement(dna)) 
+  return(sapply(orientations,toString))
+}
+
+# Stores all possible orientations of primers in objects for each primer.
+its3ngs1.ori<-allorientations(its3ngs1)
+its3ngs2.ori<-allorientations(its3ngs2)
+its3ngs3.ori<-allorientations(its3ngs3)
+its3ngs4.ori<-allorientations(its3ngs4)
+its3ngs5.ori<-allorientations(its3ngs5)
+its3ngs10.ori<-allorientations(its3ngs10)
+its4ngr.ori<-allorientations(its4ngr)
+archits4.ori<-allorientations(archits4)
+
+# Specifies the conda environment to use for cutadapt
+use_condaenv("/Users/5io/anaconda3/envs/cutadaptenv")
+
+# Uses the system2 function to pass commands to the shell to run cutadapt from R. Checking to make sure R can find Cutadapt. 
+system2("conda",args=c("run", "-n", "cutadaptenv", "cutadapt", "--version"))
+
+# Creates a directory to store the forward and reverse reads after they have been trimmed. 
+path.cut_initial<-file.path(soil_its_path_initial,"cutadapt")
+if(!dir.exists(path.cut_initial)) dir.create(path.cut_initial)
+
+forwardreads.cut_its_soil_initial<-file.path(path.cut_initial,basename(forwardreads_its_soil_initial))
+reversereads.cut_its_soil_initial<-file.path(path.cut_initial,basename(reversereads_its_soil_initial))
+
+# Creates objects containing the forward and reverse primer reverse compliment strings. Calls the rc function of the dada2 package. The rc function takes a sequence object provided by the user and creates the reverse compliment of the sequence. 
+its3ngs1.rc1<-dada2::rc(its3ngs1)
+its3ngs2.rc1<-dada2::rc(its3ngs2)
+its3ngs3.rc1<-dada2::rc(its3ngs3)
+its3ngs4.rc1<-dada2::rc(its3ngs4)
+its3ngs5.rc1<-dada2::rc(its3ngs5)
+its3ngs10.rc1<-dada2::rc(its3ngs10)
+its4ngr.rc1<-dada2::rc(its4ngr)
+archits4.rc1<-dada2::rc(archits4)
+
+# Uses the paste function to create objects that contain the flags for the potential combinations of each forward and reverse primer and the reverse compliment. These flags will serve as the arguments provided to cutadapt. The ^ at the beginning of the sequence indicates that the primer should be removed from the beginning of the sequence. 
+its3ngs1.its4.r1.flags<-paste("-a"," ", "^", its3ngs1,"...",its4ngr.rc1, sep='') 
+its3ngs1.arch.r1.flags<-paste("-a"," ", "^", its3ngs1,"...",archits4.rc1, sep='') 
+its3ngs2.its4.r1.flags<-paste("-a"," ", "^", its3ngs2,"...",its4ngr.rc1, sep='') 
+its3ngs2.arch.r1.flags<-paste("-a"," ", "^", its3ngs2,"...",archits4.rc1, sep='') 
+its3ngs3.its4.r1.flags<-paste("-a"," ", "^", its3ngs3,"...",its4ngr.rc1, sep='') 
+its3ngs3.arch.r1.flags<-paste("-a"," ", "^", its3ngs3,"...",archits4.rc1, sep='')
+its3ngs4.its4.r1.flags<-paste("-a"," ", "^", its3ngs4,"...",its4ngr.rc1, sep='') 
+its3ngs4.arch.r1.flags<-paste("-a"," ", "^", its3ngs4,"...",archits4.rc1, sep='')
+its3ngs5.its4.r1.flags<-paste("-a"," ", "^", its3ngs5,"...",its4ngr.rc1, sep='') 
+its3ngs5.arch.r1.flags<-paste("-a"," ", "^", its3ngs5,"...",archits4.rc1, sep='')
+its3ngs10.its4.r1.flags<-paste("-a"," ", "^", its3ngs10,"...",its4ngr.rc1, sep='') 
+its3ngs10.arch.r1.flags<-paste("-a"," ", "^", its3ngs10,"...",archits4.rc1, sep='')
+
+its4.its3ngs1.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs1.rc1, sep='') 
+arch.its3ngs1.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs1.rc1, sep='') 
+its4.its3ngs2.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs2.rc1, sep='') 
+arch.its3ngs2.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs2.rc1, sep='') 
+its4.its3ngs3.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs3.rc1, sep='') 
+arch.its3ngs3.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs3.rc1, sep='') 
+its4.its3ngs4.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs4.rc1, sep='') 
+arch.its3ngs4.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs4.rc1, sep='') 
+its4.its3ngs5.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs5.rc1, sep='') 
+arch.its3ngs5.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs5.rc1, sep='') 
+its4.its3ngs10.r2.flags<-paste("-A"," ", "^", its4ngr,"...",its3ngs10.rc1, sep='') 
+arch.its3ngs10.r2.flags<-paste("-A"," ", "^", archits4,"...",its3ngs10.rc1, sep='') 
+
+
+# Uses cutadapt to remove the primers from each read. Removing any read that does not have the forward primer or the reverse primer in the correct orientation.
+for (i in seq_along(forwardreads_its_soil_initial)){
+  system2("conda",args=c("run -n cutadaptenv cutadapt",
+                          its3ngs1.its4.r1.flags,
+                          its3ngs1.arch.r1.flags,
+                          its3ngs2.its4.r1.flags,
+                          its3ngs2.arch.r1.flags,
+                          its3ngs3.its4.r1.flags,
+                          its3ngs3.arch.r1.flags,
+                          its3ngs4.its4.r1.flags,
+                          its3ngs4.arch.r1.flags,
+                          its3ngs5.its4.r1.flags,
+                          its3ngs5.arch.r1.flags,
+                          its3ngs10.its4.r1.flags,
+                          its3ngs10.arch.r1.flags,
+                          its4.its3ngs1.r2.flags,
+                          arch.its3ngs1.r2.flags,
+                          its4.its3ngs2.r2.flags,
+                          arch.its3ngs2.r2.flags,
+                          its4.its3ngs3.r2.flags,
+                          arch.its3ngs3.r2.flags,
+                          its4.its3ngs4.r2.flags,
+                          arch.its3ngs4.r2.flags,
+                          its4.its3ngs5.r2.flags,
+                          arch.its3ngs5.r2.flags,
+                          its4.its3ngs10.r2.flags,
+                          arch.its3ngs10.r2.flags,
+                          "--discard-untrimmed", "--minimum-length 10",
+                          "-o",forwardreads.cut_its_soil_initial[i], "-p",reversereads.cut_its_soil_initial[i],
+                          forward.filtN_its_soil_initial[i],reverse.filtN_its_soil_initial[i]))
+}
+
+# Creating new pathways for the quality filtered forward and reverse reads. 
+filtforward_its_soil_initial<-file.path(soil_its_path_initial, "filtered", (paste0(samplenames_its_soil_initial,"_F_filt.fastq")))
+filtreverse_its_soil_initial<-file.path(soil_its_path_initial,"filtered",paste0(samplenames_its_soil_initial,"_R_filt.fastq"))
+
+filtforward_its_soil_initial[duplicated(filtforward_its_soil_initial)]<-sub("filt.fastq.gz","v2_filt.fastq",filtforward_its_soil_initial[duplicated(filtforward_its_soil_initial)])
+filtreverse_its_soil_initial[duplicated(filtreverse_its_soil_initial)]<-sub("filt.fastq.gz","v2_filt.fastq",filtreverse_its_soil_initial[duplicated(filtreverse_its_soil_initial)])
+
+# Creating quality profiles for the primer trimmed forward and reverse reads. 
+primercut_qualplot_fwd_its_soil_initial<-plotQualityProfile(forwardreads.cut_its_soil_initial, aggregate=TRUE)
+primercut_qualplot_fwd_its_soil_initial
+primercut_qualplot_rev_its_soil_initial<-plotQualityProfile(reversereads.cut_its_soil_initial, aggregate=TRUE)
+primercut_qualplot_rev_its_soil_initial
+
+# Quality filtering reads using a maximum expected error threshold of 2 for the forward and reverse reads. 
+filter.out_its_soil_initial<-filterAndTrim(fwd=forwardreads.cut_its_soil_initial, filt=filtforward_its_soil_initial, rev=reversereads.cut_its_soil_initial, filt.rev=filtreverse_its_soil_initial, maxEE=c(2,2), compress=FALSE,truncLen = 225, multithread = FALSE)
+ 
+# Converting the filter.out_its_soil_initial object into a data frame. 
+filter.out_its_soil_initial<-as.data.frame(filter.out_its_soil_initial)
+
+# Checking to see the effects of the quality filtering on per sample read counts. 
+filter.out_its_soil_initial$diffs <- filter.out_its_soil_initial$reads.in-filter.out_its_soil_initial$reads.out
+
+# Using the order command to sort the dataframe by the new column (diffs) that created above. 
+filter.out_its_soil_initial[order(filter.out_its_soil_initial$reads.out),]
+
+filtforward_its_soil_initial_no_missing<-filtforward_its_soil_initial[grep("NTC_Amp1_initial_F_filt.fastq|NTC_Amp2_initial_F_filt.fastq",filtforward_its_soil_initial,invert = TRUE)]
+filtreverse_its_soil_initial_no_missing<-filtreverse_its_soil_initial[grep("NTC_Amp1_initial_R_filt.fastq|NTC_Amp2_initial_R_filt.fastq",filtreverse_its_soil_initial,invert = TRUE)]
+
+# Generating quality plots for the forward and reverse reads after quality filtering
+filtered_qualplot_fwd_its_soil_initial<-plotQualityProfile(filtforward_its_soil_initial_no_missing, aggregate=TRUE)
+filtered_qualplot_fwd_its_soil_initial
+filtered_qualplot_rev_its_soil_initial<-plotQualityProfile(filtreverse_its_soil_initial_no_missing, aggregate=TRUE)
+filtered_qualplot_rev_its_soil_initial
+
+# Dereplicating forward and reverse reads
+derepforward_its_soil_initial<-derepFastq(filtforward_its_soil_initial_no_missing,verbose=TRUE)
+derepreverse_its_soil_initial<-derepFastq(filtreverse_its_soil_initial_no_missing,verbose=TRUE)
+
+# Assigning the sample names to the dereplicated sequence objects
+#names(derepforward_its_soil_initial)<-samplenames_its_soil_initial
+#names(derepreverse_its_soil_initial)<-samplenames_its_soil_initial
+
+# Learning errors for forward and reverse reads. 
+errorforward_its_soil_initial<-learnErrors(derepforward_its_soil_initial, multithread = TRUE)
+errorreverse_its_soil_initial<-learnErrors(derepreverse_its_soil_initial,multithread = TRUE)
+
+# Error plots for forward & reverse reads
+errplots_fwd_its_soil_initial<-plotErrors(errorforward_its_soil_initial, nominalQ=TRUE)
+errplots_fwd_its_soil_initial
+errplots_rev_its_soil_initial<-plotErrors(errorreverse_its_soil_initial,nominalQ = TRUE)
+errplots_rev_its_soil_initial
+
+
+# Denoising with dada2
+dadaforwardreads_its_soil_initial<-dada(derepforward_its_soil_initial,err=errorforward_its_soil_initial,multithread = TRUE,pool=TRUE)
+dadareversereads.ds_its_soil_initial<-dada(derepreverse_its_soil_initial,err=errorreverse_its_soil_initial,multithread = TRUE,pool=TRUE)
+
+
+# Merging forward and reverse reads using mergePairs.
+merge_its_soil_initial<-mergePairs(dadaforwardreads_its_soil_initial,derepforward_its_soil_initial,dadareversereads.ds_its_soil_initial,derepreverse_its_soil_initial,verbose=TRUE)
+
+# Creating a sequence table
+seqtab_its_soil_initial<-makeSequenceTable(merge_its_soil_initial)
+hist(nchar(colnames(seqtab_its_soil_initial)))
+
+# Merging ASV tables from all three runs
+merged_sequence_table<-mergeSequenceTables(seqtab_its_soil_p1,seqtab_its_soil_p2,seqtab_its_soil_initial)
+
+# Removing chimeras using the removeBimeraDenovo function.
+seqtab.nochim_its_soil<-removeBimeraDenovo(merged_sequence_table,method="consensus", multithread=TRUE, verbose=TRUE)
+
+# Number of ASVs in the study
+ncol((seqtab.nochim_its_soil))
+nrow(seqtab.nochim_its_soil)
+
+# Number of sequences
+sum(seqtab.nochim_its_soil)
+
+# Assigning taxonomy using the assignTaxonomy function.
+taxa_its_soil<-assignTaxonomy(seqtab.nochim_its_soil,"/Users/5io/Documents/septoria_in_a_bag/its_data/sequence_data/sh_general_release_dynamic_all_25.07.2023.fasta",multithread = TRUE, minBoot=80)
+
+# Converting the taxonomy assignments to data frame so we can filter the taxonomic assignments.
+taxa.original_its_soil<-as.data.frame(taxa_its_soil)
+
+# Filtering out ASVs not assigned to a fungal phyla
+taxa.na.omit_its_soil<-taxa.original_its_soil[-(which(is.na(taxa.original_its_soil$Phylum))),]
+
+taxa.fungi_its_soil<-taxa.original_its_soil[grep("k__Fungi",taxa.original_its_soil$Kingdom),]
+
+```
+
+## **Taxonomy Merging and ASV Filtering**
+The last step is to filter the ASV abundance table by merging the ASV table with the taxonomy assignments. This will remove ASVs from the count table that were not assigned to a fungal phyla or were identified as nematodes or plant sequences. 
+```{r}
+# Transposing the ASV table so that taxonomy can be added. 
+t.seqtab.nochim_its_soil<-t(seqtab.nochim_its_soil)
+
+# Merging the two tables together based on row name. 
+t.seqtab.nochim.filt_its_soil<-t.seqtab.nochim_its_soil[row.names(t.seqtab.nochim_its_soil)%in%row.names(taxa.fungi_its_soil),]
+
+# Number of ASVs & number of sequences post-filtering
+nrow(t.seqtab.nochim.filt_its_soil)
+sum(t.seqtab.nochim.filt_its_soil)
+
+# Merging taxonomy information into ASV table
+t.seqtab.tax_its_soil<-merge(t.seqtab.nochim.filt_its_soil,taxa.fungi_its_soil, by="row.names")
+
+sort(colSums(t.seqtab.nochim.filt_its_soil))
+
+#  Creating ASV labels and make these new row names.
+asvnumber_its_soil<-as.character(c(1:nrow(t.seqtab.tax_its_soil)))
+asvnumber_its_soil<-paste("asv_its",labels(asvnumber_its_soil))
+
+row.names(t.seqtab.tax_its_soil)<-NULL
+row.names(t.seqtab.tax_its_soil)<-asvnumber_its_soil
+
+mycosphaerella_taxa<-t.seqtab.tax_its_soil[grep("Mycosphaerellaceae",t.seqtab.tax_its_soil$Family),]
+
+mycosphaerella_seqs<-setNames(mycosphaerella_taxa$Row.names,row.names(mycosphaerella_taxa))
+
+mycosphaerella_seqs_set<-DNAStringSet(mycosphaerella_seqs)
+
+writeXStringSet(mycosphaerella_seqs_set,"~/Documents/septoria_in_a_bag/its_data/mycoseqs.fa")
+
+write.table(t.seqtab.tax_its_soil,"~/OneDrive - Oak Ridge National Laboratory/septoria_in_a_bag/its_data/t.seqtab.tax_its_soil.txt",row.names = TRUE,col.names = TRUE,sep='\t')
+
+mycosphaerellales_taxa<-t.seqtab.tax_its_soil[grep("Mycosphaerellales",t.seqtab.tax_its_soil$Order),] 
+
+mycosphaerellales_seqs<-setNames(mycosphaerellales_taxa$Row.names,row.names(mycosphaerellales_taxa))
+
+mycosphaerellales_seqs_set<-DNAStringSet(mycosphaerellales_seqs)
+
+writeXStringSet(mycosphaerellales_seqs_set,"~/Documents/septoria_in_a_bag/its_data/mycosphaerellales_seqs.fa")
+
+
+```
+

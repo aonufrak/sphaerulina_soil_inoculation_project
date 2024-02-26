@@ -1,6 +1,6 @@
 # **Project Summary** 
 
-The following code describes the sequence processing steps and statistical analyses used to analyze **ITS2** and **V4** data generated for the **Sphaerulina musiva soil inoculations** project. Data comes from DNA extracted from soils. Soils were collected from pots that were amended with either a non-autoclaved forest soil or an autoclaved forest soil. After soil amendments, *Populus trichocarpa* (black cottonwood) was planted in a subset of pots. The two different strains of *Sphaerulina musiva* were added to pots. One strain was determined to be high virulence and the other was determined to be low virulence. Soils were collected from three different locations within the pots. 
+The code in this respository describes the sequence processing steps and statistical analyses used to analyze **ITS2** and **V4** data generated for the **Sphaerulina musiva soil inoculations** project. Data comes from DNA extracted from soils. Soils were collected from pots that were amended with either a non-autoclaved forest soil or an autoclaved forest soil. After soil amendments, *Populus trichocarpa* (black cottonwood) was planted in a subset of pots. The two different strains of *Sphaerulina musiva* were added to pots. One strain was determined to be high virulence and the other was determined to be low virulence. Soils were collected from three different locations within the pots. 
 
 **Treatments**
 
